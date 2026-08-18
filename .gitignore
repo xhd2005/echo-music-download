@@ -1,0 +1,12 @@
+# aria2c 运行时日志与临时文件
+logs/
+*.log
+*.aria2
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# aria2 官方包下载/解压临时产物
+aria2.zip
+aria2tmp/

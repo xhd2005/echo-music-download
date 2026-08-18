@@ -1,11 +1,19 @@
+<div align="center">
+
+<img src="logo.png" alt="歌曲下载" width="100" height="100" />
+
 # 🎵 echo-music-download · 歌曲下载
 
-> 💿 EchoMusic 插件：把酷狗歌曲下载到本地文件夹。官方登录态接口取地址，内置 aria2c 多线程下载引擎，支持进度、断点续传与批量队列。
+**把酷狗歌曲下载到本地 —— 官方接口 + 内置 aria2c，支持批量队列、并发与断点续传**
 
-![version](https://img.shields.io/badge/version-v1.1.0-31cfa1)
-![echo music](https://img.shields.io/badge/EchoMusic-%3E%3D%202.2.7--beta.9-8b5cf6)
-![platform](https://img.shields.io/badge/platform-Windows-3b82f6)
-![license](https://img.shields.io/badge/license-MIT-4ade80)
+[![release](https://img.shields.io/github/v/release/xhd2005/echo-music-download?style=flat-square&color=31cfa1&label=release)](https://github.com/xhd2005/echo-music-download/releases)
+[![license](https://img.shields.io/badge/license-MIT-green?style=flat-square)](https://github.com/xhd2005/echo-music-download/blob/main/LICENSE)
+[![stars](https://img.shields.io/github/stars/xhd2005/echo-music-download?style=flat-square&color=31cfa1)](https://github.com/xhd2005/echo-music-download/stargazers)
+[![EchoMusic](https://img.shields.io/badge/EchoMusic-%E2%89%A52.2.7--beta.9-31cfa1?style=flat-square&logo=electron&logoColor=fff)](https://github.com/hoowhoami/EchoMusic)
+
+</div>
+
+> 💿 [EchoMusic](https://github.com/hoowhoami/EchoMusic) 插件：把酷狗歌曲下载到本地文件夹。官方登录态接口取地址，内置 aria2c 多线程下载引擎，支持进度、断点续传与批量队列。
 
 ## ✨ 功能
 

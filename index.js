@@ -22,6 +22,7 @@ const POLL_INTERVAL_MS = 700;
 const LOG_MAX_BYTES = 512 * 1024;
 const STALL_TIMEOUT_MS = 30 * 1000;
 const STORAGE_SAVE_DIR = 'emd.saveDir';
+const STORAGE_SAVE_DIR_REF = 'emd.saveDirRef';
 const STORAGE_TASKS = 'emd.tasks';
 const STORAGE_QUALITY = 'emd.quality';
 const STORAGE_NAME_FORMAT = 'emd.nameFormat';
@@ -52,6 +53,54 @@ const TASK_STATE_LABEL = {
 // ---- 通用辅助 ----
 
 // iconify 数据对象 → 内联 SVG（自建组件树内宿主全局 Icon 不可解析，统一走此路径）
+
+const ICONS = {
+  download: {
+    width: 24, height: 24,
+    body: "<path fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2M7 11l5 5 5-5M12 4v12\"/>",
+  },
+  pause: {
+    width: 24, height: 24,
+    body: "<path fill=\"currentColor\" d=\"M6 5h4v14H6zm8 0h4v14h-4z\"/>",
+  },
+  play: {
+    width: 24, height: 24,
+    body: "<path fill=\"currentColor\" d=\"M6 4l14 8-14 8z\"/>",
+  },
+  rotate: {
+    width: 24, height: 24,
+    body: "<path fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M20 11a8.1 8.1 0 0 0-15.5-2m-.5-5v5h5M4 13a8.1 8.1 0 0 0 15.5 2m.5 5v-5h-5\"/>",
+  },
+  folder: {
+    width: 24, height: 24,
+    body: "<path fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-6l-2-2H5a2 2 0 0 0-2 2z\"/>",
+  },
+  trash: {
+    width: 24, height: 24,
+    body: "<path fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M4 7h16M10 11v6M14 11v6M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3\"/>",
+  },
+  check: {
+    width: 24, height: 24,
+    body: "<path fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M5 12l5 5L20 7\"/>",
+  },
+  alert: {
+    width: 24, height: 24,
+    body: "<circle cx=\"12\" cy=\"12\" r=\"9\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"/><path d=\"M12 8v4m0 4h.01\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\"/>",
+  },
+  clock: {
+    width: 24, height: 24,
+    body: "<circle cx=\"12\" cy=\"12\" r=\"9\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"/><path d=\"M12 7v5l3 3\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\"/>",
+  },
+  settings: {
+    width: 24, height: 24,
+    body: "<circle cx=\"12\" cy=\"12\" r=\"3\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"/><path d=\"M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"/>",
+  },
+  loader: {
+    width: 24, height: 24,
+    body: "<path fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48l2.83-2.83\"/>",
+  },
+};
+
 const iconSvg = (h, iconData, { size = 18, className = '' } = {}) =>
   h('svg', {
     xmlns: 'http://www.w3.org/2000/svg',
@@ -176,6 +225,7 @@ const createDownloadStore = (ctx) => {
 
   const state = reactive({
     saveDir: '',
+    saveDirRef: null,
     quality: '128',
     nameFormat: 'artist-title',
     maxConcurrent: 2,
@@ -437,18 +487,73 @@ const createDownloadStore = (ctx) => {
     const ext = extractExt(body, url);
     task.fileName = sanitizeFilename(task.artist, task.title, ext, task.format);
 
+    // 优先使用 EchoMusic beta.17 原生流式下载引擎 (ctx.net.download)
+    const useNative = Boolean(ctx.net?.download && ctx.fs?.files && state.saveDirRef?.id);
+    if (useNative) {
+      task.engine = "native";
+      task.state = "downloading";
+      task.updatedAt = Date.now();
+      persist();
+      try {
+        const handle = await ctx.net.download({
+          url,
+          target: { directoryId: state.saveDirRef.id, relativePath: task.fileName },
+          conflict: "rename",
+          resume: true,
+        });
+        task._handle = handle;
+        task._unsub = handle.subscribe((s) => {
+          if (s.totalBytes && s.totalBytes > 0) {
+            task.percent = Math.min(100, Math.round((s.receivedBytes / s.totalBytes) * 100));
+          }
+          task.speed = s.bytesPerSecond ? formatBytes(s.bytesPerSecond) + "/s" : "";
+          task.eta = s.remainingSeconds ? formatEta(s.remainingSeconds) : "";
+          if (s.state === "completed") {
+            const finalPath = `${state.saveDir}/${task.fileName}`;
+            completeTask(task, finalPath);
+          } else if (["failed", "canceled", "interrupted"].includes(s.state)) {
+            failTask(task, s.error?.message || "原生下载中断");
+          } else if (s.state === "paused") {
+            task.state = "paused";
+            persist();
+          } else if (s.state === "downloading") {
+            task.state = "downloading";
+          }
+        });
+      } catch (err) {
+        console.warn("[echo-music-download] 原生下载异常，回退 aria2c:", err);
+        // 回退 aria2c
+        task.engine = "aria2c";
+        const launch = await launchAria2(task, url);
+        if (!launch.ok) {
+          failTask(task, launch.error || "启动下载失败");
+          return;
+        }
+        task.pid = launch.pid;
+        task.state = "downloading";
+        task.updatedAt = Date.now();
+        task._lastSize = 0;
+        task._lastActivity = Date.now();
+        persist();
+        startPolling(task);
+      }
+      return;
+    }
+
+    // 备选降级：启动 aria2c 进程下载
+    task.engine = "aria2c";
     const launch = await launchAria2(task, url);
     if (!launch.ok) {
       if (launch.canceled) {
-        failTask(task, '已取消启动 aria2c；请在弹窗中允许插件运行本地程序');
+        failTask(task, "已取消启动 aria2c；请在弹窗中允许插件运行本地程序");
       } else {
-        failTask(task, launch.error || '启动 aria2c 失败');
+        failTask(task, launch.error || "启动 aria2c 失败");
       }
       return;
     }
 
     task.pid = launch.pid;
-    task.state = 'downloading';
+    task.state = "downloading";
     task.updatedAt = Date.now();
     task._lastSize = 0;
     task._lastActivity = Date.now();
@@ -517,22 +622,34 @@ const createDownloadStore = (ctx) => {
     }
   };
 
-  const retryTask = (task) => {
-    if (['queued', 'launching', 'downloading'].includes(task.state)) return;
-    task.state = 'queued';
+  const retryTask = async (task) => {
+    if (task._handle && typeof task._handle.retry === "function") {
+      task.state = "downloading";
+      task.error = "";
+      persist();
+      try {
+        await task._handle.retry();
+        return;
+      } catch {}
+    }
+    if (["queued", "launching", "downloading"].includes(task.state)) return;
+    task.state = "queued";
     task.percent = null;
-    task.speed = '';
-    task.eta = '';
-    task.note = '';
-    task.error = '';
-    task.finalPath = '';
+    task.speed = "";
+    task.eta = "";
+    task.note = "";
+    task.error = "";
+    task.finalPath = "";
     task.updatedAt = Date.now();
     persist();
     pump();
   };
 
   const cancelTask = async (task) => {
-    if (task.state === 'downloading' || task.state === 'launching') {
+    if (task._handle && typeof task._handle.cancel === "function") {
+      try { await task._handle.cancel(); } catch {}
+    }
+    if (task.state === "downloading" || task.state === "launching") {
       if (task.pid) {
         try {
           await ctx.process.terminate(task.pid);
@@ -540,10 +657,10 @@ const createDownloadStore = (ctx) => {
           /* ignore */
         }
       }
-      failTask(task, '已取消');
-    } else if (task.state === 'queued') {
-      task.state = 'failed';
-      task.error = '已取消';
+      failTask(task, "已取消");
+    } else if (task.state === "queued") {
+      task.state = "failed";
+      task.error = "已取消";
       task.updatedAt = Date.now();
       persist();
     }
@@ -565,11 +682,33 @@ const createDownloadStore = (ctx) => {
   };
 
   const chooseSaveDir = async () => {
-    const res = await ctx.dialog.selectDirectory({ title: '选择歌曲保存目录' });
-    if (res && !res.canceled && res.paths && res.paths[0]) {
-      state.saveDir = res.paths[0];
-      await ctx.storage.set(STORAGE_SAVE_DIR, state.saveDir);
-      ctx.toast.success('保存目录已更新');
+    // 优先调用 EchoMusic beta.17 原生文件授权 API (获得持久化目录沙箱引用)
+    if (ctx.fs?.files && typeof ctx.fs.files.requestDirectory === "function") {
+      try {
+        const res = await ctx.fs.files.requestDirectory({
+          access: "read-write",
+          purpose: "选择歌曲下载保存目录",
+          persist: true,
+        });
+        if (res && !res.canceled && res.directory) {
+          state.saveDirRef = res.directory;
+          state.saveDir = res.directory.displayPath || res.directory.name || "已授权目录";
+          await ctx.storage.set(STORAGE_SAVE_DIR_REF, res.directory);
+          await ctx.storage.set(STORAGE_SAVE_DIR, state.saveDir);
+          ctx.toast.success(`保存目录已授权：${state.saveDir}`);
+          return;
+        }
+      } catch (e) {
+        console.warn("[echo-music-download] 原生目录授权异常，回退对话框:", e);
+      }
+    }
+    if (ctx.dialog?.selectDirectory) {
+      const res = await ctx.dialog.selectDirectory({ title: "选择歌曲保存目录" });
+      if (res && !res.canceled && res.paths && res.paths[0]) {
+        state.saveDir = res.paths[0];
+        await ctx.storage.set(STORAGE_SAVE_DIR, state.saveDir);
+        ctx.toast.success("保存目录已更新");
+      }
     }
   };
 
@@ -604,6 +743,8 @@ const createDownloadStore = (ctx) => {
 
   const restore = async () => {
     try {
+      const savedRef = await ctx.storage.get(STORAGE_SAVE_DIR_REF);
+      if (savedRef && savedRef.id) state.saveDirRef = savedRef;
       const dir = await ctx.storage.get(STORAGE_SAVE_DIR);
       if (typeof dir === 'string' && dir.trim()) state.saveDir = dir.trim();
     } catch (e) {
@@ -694,61 +835,90 @@ const createDownloadStore = (ctx) => {
 
 const CSS = `
 .emd-root { height: 100%; display: flex; flex-direction: column; min-height: 0; }
-.emd-page { display: flex; flex-direction: column; gap: 20px; padding: 0 32px 32px; }
-.emd-header { display: flex; align-items: center; gap: 10px; margin: 20px 0 4px; }
-.emd-header-icon { color: var(--color-primary, #31cfa1); }
-.emd-title { margin: 0; font-size: 22px; font-weight: 900; letter-spacing: -0.02em; color: var(--color-text-main, #f8fafc); }
-.emd-section { border: 1px solid var(--border-subtle, rgba(148,163,184,0.16)); border-radius: 18px; background: var(--color-bg-elevated, rgba(148,163,184,0.08)); box-shadow: var(--shadow-sm, 0 1px 2px rgba(0,0,0,0.2)); padding: 16px; }
-.emd-section-title { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; font-size: 13px; font-weight: 900; color: var(--color-text-main, #f8fafc); }
-.emd-section-title svg { color: var(--color-primary, #31cfa1); }
+.emd-page { display: flex; flex-direction: column; gap: 16px; padding: 20px 32px 36px; max-width: 1200px; margin: 0 auto; width: 100%; box-sizing: border-box; }
+.emd-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.emd-header-left { display: flex; align-items: center; gap: 12px; }
+.emd-header-icon-box { width: 36px; height: 36px; border-radius: 10px; background: color-mix(in srgb, var(--color-primary, #00cc65) 14%, transparent); border: 1px solid color-mix(in srgb, var(--color-primary, #00cc65) 24%, transparent); display: flex; align-items: center; justify-content: center; color: var(--color-primary, #00cc65); }
+.emd-title { margin: 0; font-size: 20px; font-weight: 800; letter-spacing: -0.01em; color: var(--text-main, #ffffff); }
+.emd-subtitle { margin: 2px 0 0; font-size: 11.5px; font-weight: 500; color: var(--text-secondary, #bcbcbc); }
+
+/* 控制与设置区域 */
+.emd-section { border: 1px solid var(--border-light, #444446); border-radius: 14px; background: var(--surface-card-base, #343436); padding: 14px 18px; display: flex; flex-direction: column; gap: 12px; }
+.emd-section-title { display: flex; align-items: center; justify-content: space-between; margin: 0; font-size: 13px; font-weight: 750; color: var(--text-main, #ffffff); }
+.emd-section-title-left { display: flex; align-items: center; gap: 8px; }
 .emd-current { display: flex; align-items: center; gap: 14px; }
-.emd-cover { width: 56px; height: 56px; border-radius: 12px; object-fit: cover; flex-shrink: 0; background: var(--control-muted-bg, rgba(148,163,184,0.1)); }
-.emd-current-info { flex: 1; min-width: 0; }
-.emd-current-title { margin: 0; font-size: 15px; font-weight: 900; color: var(--color-text-main, #f8fafc); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.emd-current-artist { margin: 3px 0 0; font-size: 12px; font-weight: 700; color: var(--color-text-secondary, rgba(148,163,184,0.9)); opacity: 0.75; }
-.emd-savedir { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.emd-savedir-path { flex: 1; min-width: 0; font-size: 12px; font-weight: 700; color: var(--color-text-secondary, rgba(148,163,184,0.9)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.emd-quality-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
-.emd-quality-label { font-size: 12px; font-weight: 900; color: var(--color-text-main, #f8fafc); flex-shrink: 0; }
-.emd-chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
-.emd-chip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--border-subtle, rgba(148,163,184,0.16)); background: var(--control-muted-bg, rgba(148,163,184,0.1)); color: var(--color-text-main, #f8fafc); border-radius: 999px; padding: 4px 12px; font-size: 12px; font-weight: 700; cursor: pointer; transition: all 0.15s; }
-.emd-chip:hover { opacity: 0.85; }
-.emd-chip-active { background: color-mix(in srgb, var(--color-primary, #31cfa1) 18%, transparent); border-color: var(--color-primary, #31cfa1); color: var(--color-primary, #31cfa1); }
-.emd-search { width: 100%; box-sizing: border-box; border: 1px solid var(--border-subtle, rgba(148,163,184,0.16)); background: var(--control-muted-bg, rgba(148,163,184,0.1)); color: var(--color-text-main, #f8fafc); border-radius: 999px; padding: 6px 14px; font-size: 12px; font-weight: 700; outline: none; margin-bottom: 12px; }
-.emd-search:focus { border-color: var(--color-primary, #31cfa1); }
-.emd-search::placeholder { color: var(--color-text-secondary, rgba(148,163,184,0.9)); opacity: 0.5; }
-.emd-song-list { display: flex; flex-direction: column; max-height: 320px; overflow-y: auto; border: 1px solid var(--border-subtle, rgba(148,163,184,0.12)); border-radius: 12px; }
-.emd-song-row { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--border-subtle, rgba(148,163,184,0.08)); }
+.emd-cover { width: 50px; height: 50px; border-radius: 10px; object-fit: cover; flex-shrink: 0; background: var(--bg-elevated, #29292b); border: 1px solid var(--border-light, #444446); }
+.emd-current-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.emd-current-title { margin: 0; font-size: 14px; font-weight: 750; color: var(--text-main, #ffffff); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.emd-current-artist { margin: 0; font-size: 11.5px; font-weight: 500; color: var(--text-secondary, #bcbcbc); }
+.emd-savedir { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; border-radius: 10px; background: var(--bg-elevated, #29292b); border: 1px solid var(--border-light, #444446); }
+.emd-savedir-path { flex: 1; min-width: 0; font-size: 11.5px; font-weight: 600; color: var(--text-secondary, #bcbcbc); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.emd-quality-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+.emd-quality-label { font-size: 12px; font-weight: 700; color: var(--text-main, #ffffff); }
+
+/* 筛选芯片与搜索 */
+.emd-chip-row { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.emd-chip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--border-light, #444446); background: var(--surface-card-base, #343436); color: var(--text-secondary, #bcbcbc); border-radius: 8px; padding: 4px 12px; font-size: 11.5px; font-weight: 650; cursor: pointer; transition: all 0.15s ease; }
+.emd-chip:hover { color: var(--text-main, #ffffff); background: var(--bg-elevated, #29292b); }
+.emd-chip-active { background: color-mix(in srgb, var(--color-primary, #00cc65) 14%, transparent); border-color: var(--color-primary, #00cc65); color: var(--color-primary, #00cc65); }
+.emd-search { width: 100%; box-sizing: border-box; border: 1px solid var(--border-light, #444446); background: var(--bg-elevated, #29292b); color: var(--text-main, #ffffff); border-radius: 10px; padding: 7px 14px; font-size: 12px; font-weight: 500; outline: none; margin-bottom: 10px; transition: border-color 0.15s ease; }
+.emd-search:focus { border-color: var(--color-primary, #00cc65); }
+.emd-search::placeholder { color: var(--text-secondary, #bcbcbc); opacity: 0.6; }
+
+/* 歌曲批量下载列表 */
+.emd-song-list { display: flex; flex-direction: column; max-height: 280px; overflow-y: auto; border: 1px solid var(--border-light, #444446); border-radius: 10px; background: var(--bg-elevated, #29292b); }
+.emd-song-row { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--border-light, #444446); transition: background 0.12s ease; }
 .emd-song-row:last-child { border-bottom: none; }
-.emd-song-row input { accent-color: var(--color-primary, #31cfa1); }
-.emd-song-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 700; color: var(--color-text-main, #f8fafc); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
-.emd-batch-actions { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
-.emd-hint { margin: 8px 0 0; font-size: 11px; font-weight: 700; color: var(--color-text-secondary, rgba(148,163,184,0.9)); opacity: 0.6; }
-.emd-task-list { display: flex; flex-direction: column; gap: 8px; }
-.emd-task { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--border-subtle, rgba(148,163,184,0.12)); border-radius: 12px; background: var(--control-muted-bg, rgba(148,163,184,0.06)); padding: 10px 12px; }
+.emd-song-row:hover { background: var(--surface-card-base, #343436); }
+.emd-song-row input { accent-color: var(--color-primary, #00cc65); }
+.emd-song-name { flex: 1; min-width: 0; font-size: 12.5px; font-weight: 650; color: var(--text-main, #ffffff); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.emd-batch-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; }
+
+/* 任务列表与流式监控项 */
+.emd-task-list { display: flex; flex-direction: column; gap: 6px; }
+.emd-task { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--border-light, #444446); border-radius: 10px; background: var(--surface-card-base, #343436); padding: 10px 14px; position: relative; overflow: hidden; transition: all 0.18s ease; }
+.emd-task:hover { border-color: color-mix(in srgb, var(--color-primary, #00cc65) 30%, var(--border-light, #444446)); }
 .emd-task-head { display: flex; align-items: center; gap: 10px; }
-.emd-task-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 700; color: var(--color-text-main, #f8fafc); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.emd-tag { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 10px; font-weight: 900; flex-shrink: 0; }
-.emd-tag-quality { background: rgba(148,163,184,0.15); color: var(--color-text-secondary, rgba(148,163,184,0.9)); }
-.emd-tag-queued { background: rgba(148,163,184,0.15); color: var(--color-text-secondary, rgba(148,163,184,0.9)); }
-.emd-tag-launching { background: rgba(148,163,184,0.15); color: var(--color-text-secondary, rgba(148,163,184,0.9)); }
-.emd-tag-downloading { background: color-mix(in srgb, var(--color-primary, #31cfa1) 18%, transparent); color: var(--color-primary, #31cfa1); }
-.emd-tag-done { background: rgba(74,222,128,0.15); color: #4ade80; }
-.emd-tag-failed { background: rgba(248,113,113,0.15); color: #f87171; }
-.emd-progress { height: 6px; border-radius: 999px; background: var(--control-muted-bg, rgba(148,163,184,0.15)); overflow: hidden; }
-.emd-progress-fill { height: 100%; border-radius: 999px; background: var(--color-primary, #31cfa1); transition: width 0.3s; }
-.emd-task-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-size: 11px; font-weight: 700; color: var(--color-text-secondary, rgba(148,163,184,0.9)); opacity: 0.75; }
-.emd-note { color: #fbbf24; }
-.emd-task-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-shrink: 0; }
-.emd-icon-btn { display: inline-flex; align-items: center; justify-content: center; border: none; background: none; padding: 4px; border-radius: 6px; color: var(--color-text-secondary, rgba(148,163,184,0.9)); cursor: pointer; transition: all 0.15s; }
-.emd-icon-btn:hover { background: var(--control-muted-bg, rgba(148,163,184,0.12)); color: var(--color-text-main, #f8fafc); }
+.emd-task-status-icon { width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.emd-task-name { flex: 1; min-width: 0; font-size: 12.5px; font-weight: 700; color: var(--text-main, #ffffff); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* 速率脉冲与标签 */
+.emd-speed-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; color: var(--color-primary, #00cc65); font-variant-numeric: tabular-nums; }
+.emd-pulse-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--color-primary, #00cc65); animation: emd-pulse 1.6s infinite; }
+@keyframes emd-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.85); }
+}
+
+.emd-tag { display: inline-flex; align-items: center; border-radius: 6px; padding: 2px 7px; font-size: 10px; font-weight: 750; flex-shrink: 0; border: 1px solid transparent; }
+.emd-tag-quality { background: var(--bg-elevated, #29292b); color: var(--text-secondary, #bcbcbc); border-color: var(--border-light, #444446); font-variant-numeric: tabular-nums; }
+.emd-tag-queued { background: var(--bg-elevated, #29292b); color: var(--text-secondary, #bcbcbc); border-color: var(--border-light, #444446); }
+.emd-tag-launching { background: color-mix(in srgb, #f59e0b 14%, transparent); color: #f59e0b; border-color: color-mix(in srgb, #f59e0b 25%, transparent); }
+.emd-tag-downloading { background: color-mix(in srgb, var(--color-primary, #00cc65) 14%, transparent); color: var(--color-primary, #00cc65); border-color: color-mix(in srgb, var(--color-primary, #00cc65) 25%, transparent); }
+.emd-tag-done { background: color-mix(in srgb, #10b981 14%, transparent); color: #10b981; border-color: color-mix(in srgb, #10b981 25%, transparent); }
+.emd-tag-failed { background: color-mix(in srgb, #ef4444 14%, transparent); color: #ef4444; border-color: color-mix(in srgb, #ef4444 25%, transparent); }
+
+/* 细长微进度槽 */
+.emd-progress { height: 3px; border-radius: 999px; background: var(--bg-elevated, #29292b); overflow: hidden; margin-top: 2px; }
+.emd-progress-fill { height: 100%; border-radius: 999px; background: var(--color-primary, #00cc65); transition: width 0.3s ease; }
+.emd-task-meta { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 11px; font-weight: 500; color: var(--text-secondary, #bcbcbc); }
+.emd-task-meta-left { display: flex; align-items: center; gap: 8px; }
+.emd-task-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; flex-shrink: 0; }
+.emd-icon-btn { display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--border-light, #444446); background: var(--bg-elevated, #29292b); width: 26px; height: 26px; border-radius: 6px; color: var(--text-secondary, #bcbcbc); cursor: pointer; transition: all 0.15s ease; }
+.emd-icon-btn:hover { background: var(--surface-card-base, #343436); color: var(--text-main, #ffffff); border-color: var(--color-primary, #00cc65); }
 .emd-icon-btn:disabled { opacity: 0.35; cursor: default; }
-.emd-empty { padding: 32px 16px; text-align: center; font-size: 12px; font-weight: 700; color: var(--color-text-secondary, rgba(148,163,184,0.9)); opacity: 0.6; }
-.emd-settings { display: flex; flex-direction: column; gap: 16px; }
-.emd-setting-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.emd-setting-copy { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.emd-setting-label { font-size: 13px; font-weight: 900; color: var(--color-text-main, #f8fafc); }
-.emd-setting-hint { font-size: 11px; font-weight: 700; color: var(--color-text-secondary, rgba(148,163,184,0.9)); opacity: 0.6; line-height: 1.5; }
+
+.emd-empty { padding: 48px 16px; text-align: center; font-size: 12px; font-weight: 600; color: var(--text-secondary, #bcbcbc); }
+.emd-settings { display: flex; flex-direction: column; gap: 14px; }
+.emd-setting-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; border-radius: 12px; background: var(--surface-card-base, #343436); border: 1px solid var(--border-light, #444446); }
+.emd-setting-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.emd-setting-label { font-size: 13px; font-weight: 750; color: var(--text-main, #ffffff); }
+.emd-setting-hint { font-size: 11.5px; font-weight: 500; color: var(--text-secondary, #bcbcbc); line-height: 1.4; }
+.emd-spin { animation: emd-spin 0.9s linear infinite; }
+@keyframes emd-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
 `;
 
 // ---- 激活 ----

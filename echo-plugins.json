@@ -2,6 +2,15 @@
   "name": "xhd2005 的 EchoMusic 插件源",
   "homepage": "https://github.com/xhd2005/echo-music-download",
   "plugins": [
-    { "id": "echo-music-download", "tags": ["下载", "酷狗", "本地", "aria2"] }
+    {
+      "id": "echo-music-download",
+      "tags": [
+        "下载",
+        "酷狗",
+        "本地",
+        "aria2"
+      ],
+      "downloadUrl": "https://github.com/xhd2005/echo-music-download/releases/download/v2.0.0/echo-music-download-v2.0.0.zip"
+    }
   ]
 }

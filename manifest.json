@@ -1,8 +1,8 @@
 {
   "id": "echo-music-download",
   "name": "歌曲下载",
-  "version": "2.1.0",
-  "description": "酷狗歌曲下载到本地：支持原生流式极速下载与断点续传、目录沙箱持久授权、高精度速率脉冲与 aria2c 引擎降级兼容",
+  "version": "2.2.0",
+  "description": "酷狗歌曲与歌单全功能下载器：支持原生流式下载、MP3(ID3v2.3)/FLAC 封面与歌词内嵌、同名双语 .lrc 导出、用户歌单增量同步及灰歌解灰联动下载",
   "author": "xhd2005",
   "icon": "logo.png",
   "main": "index.js",
@@ -10,9 +10,10 @@
     "kugouApi": true,
     "localFiles": true,
     "downloads": true,
-    "process": true
+    "process": true,
+    "unrestrictedNetwork": true
   },
   "requires": {
-    "echoMusicVersion": ">=2.2.7-beta.9"
+    "echoMusicVersion": ">=2.3.2"
   }
 }

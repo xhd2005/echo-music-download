@@ -150,6 +150,38 @@ const sanitizeFilename = (artist, title, ext, format = 'artist-title') => {
   return `${base}.${ext}`;
 };
 
+// 字节速率与剩余时间格式化（供原生流式下载进度脉冲使用）
+const formatBytes = (bytes) => {
+  const num = Number(bytes);
+  if (!Number.isFinite(num) || num <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let val = num;
+  let idx = 0;
+  while (val >= 1024 && idx < units.length - 1) {
+    val /= 1024;
+    idx += 1;
+  }
+  return `${val >= 100 || idx === 0 ? Math.round(val) : val.toFixed(1)} ${units[idx]}`;
+};
+
+const formatEta = (seconds) => {
+  const sec = Math.max(0, Math.round(Number(seconds) || 0));
+  if (!sec) return '';
+  if (sec < 60) return `${sec}s`;
+  const mins = Math.floor(sec / 60);
+  const rem = sec % 60;
+  if (mins < 60) return rem > 0 ? `${mins}m${rem}s` : `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  return `${hours}h${mins % 60}m`;
+};
+
+// 兼容 EchoMusic v2.3.2+ 直接挂载在 ctx.fs 上的目录授权 API 以及旧版 ctx.fs.files
+const getFsGrantApi = (ctx) => {
+  if (ctx?.fs && typeof ctx.fs.requestDirectory === 'function') return ctx.fs;
+  if (ctx?.fs?.files && typeof ctx.fs.files.requestDirectory === 'function') return ctx.fs.files;
+  return null;
+};
+
 // 从 getSongUrl 响应中提取可播放 URL（移植宿主 resolveUrlsFromResponse）
 const appendUrlCandidate = (urls, value) => {
   if (typeof value === 'string') {
@@ -487,20 +519,66 @@ const createDownloadStore = (ctx) => {
     const ext = extractExt(body, url);
     task.fileName = sanitizeFilename(task.artist, task.title, ext, task.format);
 
-    // 优先使用 EchoMusic beta.17 原生流式下载引擎 (ctx.net.download)
-    const useNative = Boolean(ctx.net?.download && ctx.fs?.files && state.saveDirRef?.id);
+    // 优先使用 EchoMusic v2.3.2+ 原生流式下载引擎 (ctx.net.download + ctx.fs 目录授权)
+    const fsGrants = getFsGrantApi(ctx);
+    const useNative = Boolean(ctx.net?.download && fsGrants && state.saveDirRef?.id);
     if (useNative) {
       task.engine = "native";
       task.state = "downloading";
       task.updatedAt = Date.now();
       persist();
       try {
-        const handle = await ctx.net.download({
-          url,
-          target: { directoryId: state.saveDirRef.id, relativePath: task.fileName },
-          conflict: "rename",
-          resume: true,
-        });
+        if (state.saveDirRef.available === false && typeof fsGrants.reauthorizeDirectoryGrant === "function") {
+          const reauth = await fsGrants.reauthorizeDirectoryGrant(state.saveDirRef.id, {
+            access: "read-write",
+            purpose: "选择歌曲下载保存目录",
+            persist: true,
+          });
+          if (reauth && reauth.ok !== false && !reauth.canceled && reauth.directory) {
+            state.saveDirRef = reauth.directory;
+            state.saveDir = reauth.directory.displayPath || reauth.directory.name || state.saveDir;
+            await ctx.storage.set(STORAGE_SAVE_DIR_REF, reauth.directory);
+            await ctx.storage.set(STORAGE_SAVE_DIR, state.saveDir);
+          }
+        }
+        let handle;
+        try {
+          handle = await ctx.net.download({
+            url,
+            name: task.name,
+            target: { directoryId: state.saveDirRef.id, relativePath: task.fileName },
+            conflict: "rename",
+            resume: true,
+          });
+        } catch (dlErr) {
+          if (
+            typeof fsGrants.reauthorizeDirectoryGrant === "function" &&
+            /GRANT|DIRECTORY|ACCESS|UNAVAILABLE/i.test(String(dlErr?.code || dlErr?.message || ""))
+          ) {
+            const reauth = await fsGrants.reauthorizeDirectoryGrant(state.saveDirRef.id, {
+              access: "read-write",
+              purpose: "恢复歌曲下载保存目录访问权限",
+              persist: true,
+            });
+            if (reauth && reauth.ok !== false && !reauth.canceled && reauth.directory) {
+              state.saveDirRef = reauth.directory;
+              state.saveDir = reauth.directory.displayPath || reauth.directory.name || state.saveDir;
+              await ctx.storage.set(STORAGE_SAVE_DIR_REF, reauth.directory);
+              await ctx.storage.set(STORAGE_SAVE_DIR, state.saveDir);
+              handle = await ctx.net.download({
+                url,
+                name: task.name,
+                target: { directoryId: state.saveDirRef.id, relativePath: task.fileName },
+                conflict: "rename",
+                resume: true,
+              });
+            } else {
+              throw dlErr;
+            }
+          } else {
+            throw dlErr;
+          }
+        }
         task._handle = handle;
         task._unsub = handle.subscribe((s) => {
           if (s.totalBytes && s.totalBytes > 0) {
@@ -509,9 +587,26 @@ const createDownloadStore = (ctx) => {
           task.speed = s.bytesPerSecond ? formatBytes(s.bytesPerSecond) + "/s" : "";
           task.eta = s.remainingSeconds ? formatEta(s.remainingSeconds) : "";
           if (s.state === "completed") {
-            const finalPath = `${state.saveDir}/${task.fileName}`;
+            const actualName =
+              s.result?.file?.kind === "directory-file" && s.result.file.relativePath
+                ? s.result.file.relativePath
+                : task.fileName;
+            task.fileName = actualName;
+            const finalPath = `${state.saveDir}/${actualName}`;
+            if (typeof task._unsub === "function") {
+              try {
+                task._unsub();
+              } catch {}
+              task._unsub = null;
+            }
             completeTask(task, finalPath);
           } else if (["failed", "canceled", "interrupted"].includes(s.state)) {
+            if (typeof task._unsub === "function") {
+              try {
+                task._unsub();
+              } catch {}
+              task._unsub = null;
+            }
             failTask(task, s.error?.message || "原生下载中断");
           } else if (s.state === "paused") {
             task.state = "paused";
@@ -646,6 +741,10 @@ const createDownloadStore = (ctx) => {
   };
 
   const cancelTask = async (task) => {
+    if (typeof task._unsub === "function") {
+      try { task._unsub(); } catch {}
+      task._unsub = null;
+    }
     if (task._handle && typeof task._handle.cancel === "function") {
       try { await task._handle.cancel(); } catch {}
     }
@@ -682,15 +781,19 @@ const createDownloadStore = (ctx) => {
   };
 
   const chooseSaveDir = async () => {
-    // 优先调用 EchoMusic beta.17 原生文件授权 API (获得持久化目录沙箱引用)
-    if (ctx.fs?.files && typeof ctx.fs.files.requestDirectory === "function") {
+    // 优先调用 EchoMusic v2.3.2+ 原生文件授权 API (获得持久化目录沙箱引用)
+    const fsGrants = getFsGrantApi(ctx);
+    if (fsGrants && typeof fsGrants.requestDirectory === "function") {
       try {
-        const res = await ctx.fs.files.requestDirectory({
+        const res = await fsGrants.requestDirectory({
           access: "read-write",
           purpose: "选择歌曲下载保存目录",
           persist: true,
         });
-        if (res && !res.canceled && res.directory) {
+        if (res && res.canceled) {
+          return;
+        }
+        if (res && res.ok !== false && !res.canceled && res.directory) {
           state.saveDirRef = res.directory;
           state.saveDir = res.directory.displayPath || res.directory.name || "已授权目录";
           await ctx.storage.set(STORAGE_SAVE_DIR_REF, res.directory);
@@ -705,7 +808,9 @@ const createDownloadStore = (ctx) => {
     if (ctx.dialog?.selectDirectory) {
       const res = await ctx.dialog.selectDirectory({ title: "选择歌曲保存目录" });
       if (res && !res.canceled && res.paths && res.paths[0]) {
+        state.saveDirRef = null;
         state.saveDir = res.paths[0];
+        await ctx.storage.set(STORAGE_SAVE_DIR_REF, null);
         await ctx.storage.set(STORAGE_SAVE_DIR, state.saveDir);
         ctx.toast.success("保存目录已更新");
       }
@@ -744,9 +849,26 @@ const createDownloadStore = (ctx) => {
   const restore = async () => {
     try {
       const savedRef = await ctx.storage.get(STORAGE_SAVE_DIR_REF);
-      if (savedRef && savedRef.id) state.saveDirRef = savedRef;
+      if (savedRef && savedRef.id) {
+        state.saveDirRef = savedRef;
+        const fsGrants = getFsGrantApi(ctx);
+        if (fsGrants && typeof fsGrants.listDirectoryGrants === 'function') {
+          try {
+            const grants = await fsGrants.listDirectoryGrants();
+            if (Array.isArray(grants)) {
+              const matched = grants.find((g) => g && g.id === savedRef.id);
+              if (matched) {
+                state.saveDirRef = matched;
+                if (matched.displayPath || matched.name) {
+                  state.saveDir = matched.displayPath || matched.name;
+                }
+              }
+            }
+          } catch {}
+        }
+      }
       const dir = await ctx.storage.get(STORAGE_SAVE_DIR);
-      if (typeof dir === 'string' && dir.trim()) state.saveDir = dir.trim();
+      if (!state.saveDir && typeof dir === 'string' && dir.trim()) state.saveDir = dir.trim();
     } catch (e) {
       /* ignore */
     }
@@ -805,6 +927,12 @@ const createDownloadStore = (ctx) => {
   const dispose = () => {
     for (const t of state.tasks) {
       stopPolling(t);
+      if (typeof t._unsub === 'function') {
+        try {
+          t._unsub();
+        } catch {}
+        t._unsub = null;
+      }
       if ((t.state === 'downloading' || t.state === 'launching') && t.pid) {
         try {
           void ctx.process.terminate(t.pid);

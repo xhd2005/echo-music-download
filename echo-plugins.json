@@ -4,13 +4,15 @@
   "plugins": [
     {
       "id": "echo-music-download",
+      "repo": "xhd2005/echo-music-download",
       "tags": [
         "下载",
         "酷狗",
         "本地",
+        "流式下载",
+        "断点续传",
         "aria2"
-      ],
-      "downloadUrl": "https://github.com/xhd2005/echo-music-download/releases/download/v2.0.0/echo-music-download-v2.0.0.zip"
+      ]
     }
   ]
 }

@@ -2011,6 +2011,12 @@ const createDownloadStore = (ctx) => {
 // ============================================================================
 
 const CSS = `
+.emd-root {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
 .emd-v2-body {
   padding: 16px 32px 48px;
   display: flex;
@@ -2436,6 +2442,7 @@ export function activate(ctx) {
   const Switch = defineAsyncComponent(ctx.ui.components.Switch);
   const Select = defineAsyncComponent(ctx.ui.components.Select);
   const CustomTabBar = defineAsyncComponent(ctx.ui.components.CustomTabBar);
+  const PageScrollContainer = defineAsyncComponent(ctx.ui.components.PageScrollContainer);
   const DetailPageSliverHeader = defineAsyncComponent(ctx.ui.components.DetailPageSliverHeader);
   const PageStickyHeader = defineAsyncComponent(ctx.ui.components.PageStickyHeader);
   const SongSearchInput = defineAsyncComponent(ctx.ui.components.SongSearchInput);
@@ -3427,158 +3434,167 @@ export function activate(ctx) {
         const counts = taskCounts.value;
         const hasSaveDir = Boolean(store.state.saveDir);
 
-        return h('div', { class: 'select-none min-h-full flex flex-col' }, [
-          // 1. EchoMusic v2.3.x 原生 SliverHeader
+        return h('div', { class: 'emd-root h-full flex flex-col min-h-0' }, [
           h(
-            DetailPageSliverHeader,
-            {
-              ref: headerRef,
-              typeLabel: '音乐下载与标签内嵌中心',
-              title: '歌曲下载',
-              coverUrl: HEADER_COVER_SVG,
-              hasDetails: true,
-              distributeDetails: true,
-              expandedHeight: 176,
-              collapsedHeight: 56,
-            },
-            {
-              details: () =>
-                h(
-                  'div',
-                  {
-                    class: 'flex flex-col justify-between text-[12px] text-text-secondary',
-                    style: { minHeight: '52px' },
-                  },
-                  [
-                    h('div', { class: 'flex flex-wrap items-center gap-x-4 gap-y-1 font-medium' }, [
-                      h(
-                        'span',
-                        null,
-                        hasSaveDir ? `目录：${store.state.saveDir}` : '尚未授权保存目录',
-                      ),
-                      h('span', null, `进行中 ${counts.active}`),
-                      h('span', null, `已完成 ${counts.done}`),
-                      h(
-                        'span',
-                        null,
-                        `音质：${store.state.quality === 'flac' ? '无损 FLAC 优先' : `${store.state.quality}kbps`}`,
-                      ),
-                    ]),
-                    h(
-                      'div',
-                      { class: 'line-clamp-1 text-[11.5px] opacity-80' },
-                      '支持 MP3(ID3v2.3) / FLAC(Vorbis+Picture) 封面与歌词内嵌、双语 .lrc 导出、用户歌单增量同步与灰歌解灰下载',
-                    ),
-                  ],
-                ),
-              actions: () =>
-                h('div', { class: 'flex items-center gap-2.5 flex-wrap' }, [
-                  h(
-                    Button,
-                    {
-                      variant: 'primary',
-                      size: 'sm',
-                      disabled: !hasSaveDir || !currentTrack.value?.hash,
-                      onClick: downloadCurrentTrack,
-                    },
-                    {
-                      default: () => [
-                        iconSvg(h, ICONS.download, { size: 15 }),
-                        h('span', null, '下载当前播放'),
-                      ],
-                    },
-                  ),
-                  h(
-                    Button,
-                    { variant: 'outline', size: 'sm', onClick: store.chooseSaveDir },
-                    {
-                      default: () => [
-                        iconSvg(h, ICONS.folder, { size: 15 }),
-                        h('span', null, hasSaveDir ? '更换保存目录' : '选择保存目录'),
-                      ],
-                    },
-                  ),
-                ]),
-              'collapsed-actions': () =>
-                h('div', { class: 'flex items-center gap-1.5' }, [
-                  h(
-                    Button,
-                    {
-                      variant: 'primary',
-                      size: 'xs',
-                      disabled: !hasSaveDir || !currentTrack.value?.hash,
-                      onClick: downloadCurrentTrack,
-                    },
-                    { default: () => '下载当前' },
-                  ),
-                  h(
-                    Button,
-                    { variant: 'ghost', size: 'xs', onClick: store.chooseSaveDir },
-                    { default: () => '目录' },
-                  ),
-                ]),
-            },
-          ),
-
-          // 2. EchoMusic v2.3.x 原生 PageStickyHeader + CustomTabBar
-          h(
-            PageStickyHeader,
-            {
-              class: 'song-list-sticky sticky z-110 bg-bg-main',
-              stickyTop: headerHeight.value,
-            },
+            PageScrollContainer,
+            { class: 'h-full flex-1 min-h-0' },
             {
               default: () =>
-                h(
-                  'div',
-                  {
-                    class:
-                      'w-full px-8 h-[50px] flex items-center justify-between gap-4 border-b border-border-light/10',
-                  },
-                  [
-                    h(
-                      CustomTabBar,
-                      {
-                        class:
-                          'w-auto! justify-start! bg-transparent! p-0! h-auto! gap-6! border-none!',
-                        modelValue: activeTabIndex.value,
-                        tabs: ['下载任务', '歌单与队列批量下载', '下载与标签内嵌设置'],
-                        'onUpdate:modelValue': (idx) => {
-                          activeTabIndex.value = Number(idx) || 0;
-                        },
-                      },
-                      {
-                        tab: ({ label, index, selected }) =>
-                          h('span', { class: 'inline-flex items-center gap-1.5' }, [
-                            h('span', null, label),
-                            index === 0 && counts.all > 0
-                              ? h(Badge, {
-                                  count: counts.all,
-                                  tone: selected ? 'primary' : 'muted',
-                                })
-                              : null,
-                            index === 1 && batchSongs.value.length > 0
-                              ? h(Badge, {
-                                  count: batchSongs.value.length,
-                                  tone: selected ? 'primary' : 'muted',
-                                })
-                              : null,
-                          ]),
-                      },
-                    ),
-                  ],
-                ),
+                h('div', { class: 'select-none min-h-full flex flex-col' }, [
+                  // 1. EchoMusic v2.3.x 原生 SliverHeader
+                  h(
+                    DetailPageSliverHeader,
+                    {
+                      ref: headerRef,
+                      typeLabel: '音乐下载与标签内嵌中心',
+                      title: '歌曲下载',
+                      coverUrl: HEADER_COVER_SVG,
+                      hasDetails: true,
+                      distributeDetails: true,
+                      expandedHeight: 176,
+                      collapsedHeight: 56,
+                    },
+                    {
+                      details: () =>
+                        h(
+                          'div',
+                          {
+                            class: 'flex flex-col justify-between text-[12px] text-text-secondary',
+                            style: { minHeight: '52px' },
+                          },
+                          [
+                            h('div', { class: 'flex flex-wrap items-center gap-x-4 gap-y-1 font-medium' }, [
+                              h(
+                                'span',
+                                null,
+                                hasSaveDir ? `目录：${store.state.saveDir}` : '尚未授权保存目录',
+                              ),
+                              h('span', null, `进行中 ${counts.active}`),
+                              h('span', null, `已完成 ${counts.done}`),
+                              h(
+                                'span',
+                                null,
+                                `音质：${store.state.quality === 'flac' ? '无损 FLAC 优先' : `${store.state.quality}kbps`}`,
+                              ),
+                            ]),
+                            h(
+                              'div',
+                              { class: 'line-clamp-1 text-[11.5px] opacity-80' },
+                              '支持 MP3(ID3v2.3) / FLAC(Vorbis+Picture) 封面与歌词内嵌、双语 .lrc 导出、用户歌单增量同步与灰歌解灰下载',
+                            ),
+                          ],
+                        ),
+                      actions: () =>
+                        h('div', { class: 'flex items-center gap-2.5 flex-wrap' }, [
+                          h(
+                            Button,
+                            {
+                              variant: 'primary',
+                              size: 'sm',
+                              disabled: !hasSaveDir || !currentTrack.value?.hash,
+                              onClick: downloadCurrentTrack,
+                            },
+                            {
+                              default: () => [
+                                iconSvg(h, ICONS.download, { size: 15 }),
+                                h('span', null, '下载当前播放'),
+                              ],
+                            },
+                          ),
+                          h(
+                            Button,
+                            { variant: 'outline', size: 'sm', onClick: store.chooseSaveDir },
+                            {
+                              default: () => [
+                                iconSvg(h, ICONS.folder, { size: 15 }),
+                                h('span', null, hasSaveDir ? '更换保存目录' : '选择保存目录'),
+                              ],
+                            },
+                          ),
+                        ]),
+                      'collapsed-actions': () =>
+                        h('div', { class: 'flex items-center gap-1.5' }, [
+                          h(
+                            Button,
+                            {
+                              variant: 'primary',
+                              size: 'xs',
+                              disabled: !hasSaveDir || !currentTrack.value?.hash,
+                              onClick: downloadCurrentTrack,
+                            },
+                            { default: () => '下载当前' },
+                          ),
+                          h(
+                            Button,
+                            { variant: 'ghost', size: 'xs', onClick: store.chooseSaveDir },
+                            { default: () => '目录' },
+                          ),
+                        ]),
+                    },
+                  ),
+
+                  // 2. EchoMusic v2.3.x 原生 PageStickyHeader + CustomTabBar
+                  h(
+                    PageStickyHeader,
+                    {
+                      class: 'song-list-sticky sticky z-110 bg-bg-main',
+                      stickyTop: headerHeight.value,
+                    },
+                    {
+                      default: () =>
+                        h(
+                          'div',
+                          {
+                            class:
+                              'w-full px-8 h-[50px] flex items-center justify-between gap-4 border-b border-border-light/10',
+                          },
+                          [
+                            h(
+                              CustomTabBar,
+                              {
+                                class:
+                                  'w-auto! justify-start! bg-transparent! p-0! h-auto! gap-6! border-none!',
+                                modelValue: activeTabIndex.value,
+                                tabs: ['下载任务', '歌单与队列批量下载', '下载与标签内嵌设置'],
+                                'onUpdate:modelValue': (idx) => {
+                                  activeTabIndex.value = Number(idx) || 0;
+                                },
+                              },
+                              {
+                                tab: ({ label, index, selected }) =>
+                                  h('span', { class: 'inline-flex items-center gap-1.5' }, [
+                                    h('span', null, label),
+                                    index === 0 && counts.all > 0
+                                      ? h(Badge, {
+                                          count: counts.all,
+                                          tone: selected ? 'primary' : 'muted',
+                                        })
+                                      : null,
+                                    index === 1 && batchSongs.value.length > 0
+                                      ? h(Badge, {
+                                          count: batchSongs.value.length,
+                                          tone: selected ? 'primary' : 'muted',
+                                        })
+                                      : null,
+                                  ]),
+                              },
+                            ),
+                          ],
+                        ),
+                    },
+                  ),
+
+                  // 3. 页面主体内容
+                  h('div', { class: 'emd-v2-body' }, [
+                    activeTabIndex.value === 0
+                      ? renderTasksTab()
+                      : activeTabIndex.value === 1
+                        ? renderBatchTab()
+                        : renderSettingsCards(),
+                  ]),
+                ]),
             },
           ),
-
-          // 3. 页面主体内容
-          h('div', { class: 'emd-v2-body' }, [
-            activeTabIndex.value === 0
-              ? renderTasksTab()
-              : activeTabIndex.value === 1
-                ? renderBatchTab()
-                : renderSettingsCards(),
-          ]),
         ]);
       };
     },

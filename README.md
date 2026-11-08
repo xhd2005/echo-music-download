@@ -1,4 +1,4 @@
-# 歌曲下载 (`echo-music-download` v2.2.0)
+# 歌曲下载 (`echo-music-download` v2.2.1)
 
 为 **EchoMusic (`>= 2.3.2`)** 打造的**全功能歌曲与歌单下载、纯 JS 标签与封面内嵌（ID3v2.3 / FLAC）、同名双语 `.lrc` 导出及灰歌解灰联动插件**。
 

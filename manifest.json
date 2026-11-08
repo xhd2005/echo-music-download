@@ -1,7 +1,7 @@
 {
   "id": "echo-music-download",
   "name": "歌曲下载",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "酷狗歌曲与歌单全功能下载器：支持原生流式下载、MP3(ID3v2.3)/FLAC 封面与歌词内嵌、同名双语 .lrc 导出、用户歌单增量同步及灰歌解灰联动下载",
   "author": "xhd2005",
   "icon": "logo.png",

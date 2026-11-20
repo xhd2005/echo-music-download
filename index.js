@@ -1,10 +1,11 @@
-// 歌曲下载插件（echo-music-download v2.2.0）
+// 歌曲下载插件（echo-music-download v2.3.0）
 // 特性：
-// 1. EchoMusic v2.3.x 原生视觉重构：DetailPageSliverHeader + PageStickyHeader + CustomTabBar + Badge + SongSearchInput + 主题自适应 CSS 变量
-// 2. 纯 JS 音频标签与封面内嵌：支持 MP3 (ID3v2.3: TIT2/TPE1/TALB/USLT/APIC) 与 FLAC (Vorbis Comment Block 4 + Picture Block 6)
-// 3. 同名双语 .lrc 歌词文件自动生成（酷狗原词 + 联动 echo-music-unblock / 网易云双语中译合并）
-// 4. 用户全量歌单（我喜欢 / 自建 / 收藏）与播放队列批量下载、按歌单子目录归档（{playlist}/{filename}）及增量跳过已下载歌曲
-// 5. 灰歌 / VIP 受限歌曲联动 echo-music-unblock 多源解灰下载 + 宿主全局任务面板（ctx.tasks.register）进度同步
+// 1. 全新防误操作任务管理架构：单曲 / 批量 / 全局暂停、恢复与取消，FIFO 队列调度，下载确认与取消确认弹窗
+// 2. EchoMusic v2.3.x 原生视觉重构：PageScrollContainer + DetailPageSliverHeader + PageStickyHeader + CustomTabBar + Switch + Button + Badge + SongSearchInput + 主题自适应 CSS 变量
+// 3. 纯 JS 音频标签与封面内嵌：支持 MP3 (ID3v2.3: TIT2/TPE1/TALB/USLT/APIC) 与 FLAC (Vorbis Comment Block 4 + Picture Block 6)
+// 4. 同名双语 .lrc 歌词文件自动生成（酷狗原词 + 联动 echo-music-unblock / 网易云双语中译合并）
+// 5. 用户全量歌单（我喜欢 / 自建 / 收藏）与播放队列安全选歌批量下载、按歌单子目录归档（{playlist}/{filename}）及增量跳过已下载歌曲
+// 6. 灰歌 / VIP 受限歌曲联动 echo-music-unblock 多源解灰下载 + 宿主全局任务面板（ctx.tasks.register）进度同步
 
 // ---- 常量定义 ----
 
@@ -45,6 +46,7 @@ const TASK_STATE_LABEL = {
   tagging: '写标签中',
   paused: '已暂停',
   done: '已完成',
+  canceled: '已取消',
   failed: '失败',
 };
 
@@ -111,6 +113,31 @@ const ICONS = {
     width: 24,
     height: 24,
     body: '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M9 6h11M9 12h11M9 18h11M5 6v.01M5 12v.01M5 18v.01"/>',
+  },
+  pause: {
+    width: 24,
+    height: 24,
+    body: '<rect x="6" y="5" width="4" height="14" rx="1" fill="none" stroke="currentColor" stroke-width="2"/><rect x="14" y="5" width="4" height="14" rx="1" fill="none" stroke="currentColor" stroke-width="2"/>',
+  },
+  play: {
+    width: 24,
+    height: 24,
+    body: '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M7 5v14l12-7z"/>',
+  },
+  alert: {
+    width: 24,
+    height: 24,
+    body: '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>',
+  },
+  checkSquare: {
+    width: 24,
+    height: 24,
+    body: '<rect x="4" y="4" width="16" height="16" rx="3" fill="none" stroke="currentColor" stroke-width="2"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4"/>',
+  },
+  stop: {
+    width: 24,
+    height: 24,
+    body: '<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><rect x="9" y="9" width="6" height="6" rx="1" fill="currentColor"/>',
   },
 };
 
@@ -253,6 +280,19 @@ const formatEta = (seconds) => {
   if (mins < 60) return rem > 0 ? `${mins}m${rem}s` : `${mins}m`;
   const hours = Math.floor(mins / 60);
   return `${hours}h${mins % 60}m`;
+};
+
+const parseSpeedToBytes = (speedStr) => {
+  if (!speedStr) return 0;
+  const m = String(speedStr).match(/([0-9.]+)\s*([KMG]?i?B)/i);
+  if (!m) return 0;
+  const val = Number(m[1]);
+  if (!Number.isFinite(val) || val <= 0) return 0;
+  const unit = m[2].toUpperCase();
+  if (unit.startsWith('G')) return val * 1024 * 1024 * 1024;
+  if (unit.startsWith('M')) return val * 1024 * 1024;
+  if (unit.startsWith('K')) return val * 1024;
+  return val;
 };
 
 const getFsGrantApi = (ctx) => {
@@ -505,7 +545,7 @@ export const embedMp3Tags = (audioBytes, meta = {}) => {
 };
 
 const buildFlacVorbisCommentBlockBody = (meta = {}) => {
-  const vendorBytes = encodeUtf8('EchoMusic Download v2.2');
+  const vendorBytes = encodeUtf8('EchoMusic Download v2.3');
   const comments = [];
   const pushComment = (key, value) => {
     const clean = String(value ?? '').trim();
@@ -935,7 +975,7 @@ const resolveUnblockUrlForDownload = async (ctx, task, requestedQuality) => {
 // 下载状态中心与任务引擎
 // ============================================================================
 
-const createDownloadStore = (ctx) => {
+export const createDownloadStore = (ctx) => {
   const { reactive } = ctx.vue;
 
   const state = reactive({
@@ -951,59 +991,210 @@ const createDownloadStore = (ctx) => {
     existingFilesSet: new Set(),
   });
 
-  // 同步宿主全局任务中心（ctx.tasks.register）
+  // 严格通过 _countedRunning 布尔标记维护并发槽位，确保 runningCount 绝不漂移或泄漏
+  const acquireRunningSlot = (task) => {
+    if (!task || task._countedRunning) return;
+    task._countedRunning = true;
+    state.runningCount += 1;
+  };
+
+  const releaseRunningSlot = (task) => {
+    if (!task || !task._countedRunning) return;
+    task._countedRunning = false;
+    state.runningCount = Math.max(0, state.runningCount - 1);
+  };
+
+  const detachNativeHandle = (task, { clearHandle = true } = {}) => {
+    if (!task) return null;
+    if (typeof task._unsub === 'function') {
+      try {
+        task._unsub();
+      } catch {}
+      task._unsub = null;
+    }
+    const handle = task._handle || null;
+    if (clearHandle) {
+      task._handle = null;
+      task._resumeHandle = false;
+    }
+    return handle;
+  };
+
+  const normalizeTaskIdSet = (taskIds) => {
+    if (taskIds instanceof Set) return taskIds;
+    if (Array.isArray(taskIds)) return new Set(taskIds);
+    return new Set();
+  };
+
+  // 同步宿主全局任务中心（兼容 EchoMusic v2.3.x PluginTaskRegistration API）
   let hostTaskController = null;
+  let hostTaskStatus = null;
   let hostTaskTotal = 0;
+  let hostTaskCompletedInBatch = 0;
 
   const syncHostTaskPanel = () => {
     if (!ctx?.tasks?.register) return;
     const activeTasks = state.tasks.filter((t) =>
       ['queued', 'launching', 'downloading', 'tagging'].includes(t.state),
     );
-    if (activeTasks.length === 0) {
+    const pausedTasks = state.tasks.filter((t) => t.state === 'paused');
+    const remainingCount = activeTasks.length + pausedTasks.length;
+
+    if (remainingCount === 0) {
       if (hostTaskController) {
         try {
-          hostTaskController.complete({ description: '所有歌曲下载任务已完成' });
+          if (hostTaskCompletedInBatch > 0) {
+            if (typeof hostTaskController.finish === 'function') {
+              hostTaskController.finish('completed', {
+                name: '歌曲下载已完成',
+                progress: {
+                  done: hostTaskTotal,
+                  total: hostTaskTotal,
+                  percent: 100,
+                  label: '全部完成',
+                },
+                actions: [],
+              });
+            } else if (typeof hostTaskController.complete === 'function') {
+              hostTaskController.complete({ description: '所有歌曲下载任务已完成' });
+            }
+          } else if (typeof hostTaskController.finish === 'function') {
+            hostTaskController.finish('aborted', {
+              name: '下载任务已取消',
+              progress: {
+                done: 0,
+                total: hostTaskTotal,
+                percent: 0,
+                label: '已取消',
+              },
+              actions: [],
+            });
+          } else if (typeof hostTaskController.dismiss === 'function') {
+            hostTaskController.dismiss();
+          }
         } catch {}
         hostTaskController = null;
+        hostTaskStatus = null;
         hostTaskTotal = 0;
+        hostTaskCompletedInBatch = 0;
       }
       return;
     }
-    hostTaskTotal = Math.max(hostTaskTotal, activeTasks.length);
-    const doneInBatch = Math.max(0, hostTaskTotal - activeTasks.length);
-    const currentDl = activeTasks.find((t) => t.state === 'downloading' || t.state === 'tagging') || activeTasks[0];
+
+    hostTaskTotal = Math.max(hostTaskTotal, remainingCount + hostTaskCompletedInBatch);
+    const doneInBatch = Math.max(hostTaskCompletedInBatch, hostTaskTotal - remainingCount);
+    const currentDl =
+      activeTasks.find((t) => t.state === 'downloading' || t.state === 'tagging') ||
+      activeTasks[0] ||
+      pausedTasks[0];
     const currentPct = Number(currentDl?.percent || 0) / 100;
     const overallProgress = Math.min(
       0.99,
       Math.max(0.02, (doneInBatch + currentPct) / Math.max(1, hostTaskTotal)),
     );
-    const desc = currentDl
-      ? `正在处理：${currentDl.name}（剩余 ${activeTasks.length} 首）`
-      : `排队中 ${activeTasks.length} 首`;
+    const overallPercent = Math.round(overallProgress * 100);
+    const label =
+      activeTasks.length > 0
+        ? currentDl
+          ? `正在处理：${currentDl.name}（剩余 ${activeTasks.length} 首${pausedTasks.length > 0 ? `，已暂停 ${pausedTasks.length} 首` : ''}）`
+          : `排队中 ${activeTasks.length} 首`
+        : `已暂停 ${pausedTasks.length} 首，点击可继续下载`;
 
-    if (!hostTaskController) {
+    const actions = [
+      {
+        id: 'open-downloads',
+        label: '查看队列',
+        variant: 'ghost',
+        closePanel: true,
+        onClick: () => {
+          try {
+            ctx.router?.push?.('/main/plugin/echo-music-download/downloads');
+          } catch {}
+        },
+      },
+    ];
+    if (activeTasks.some((t) => ['queued', 'launching', 'downloading'].includes(t.state))) {
+      actions.push({
+        id: 'pause-all',
+        label: '全部暂停',
+        variant: 'ghost',
+        onClick: () => {
+          void pauseAll();
+        },
+      });
+    }
+    if (pausedTasks.length > 0) {
+      actions.push({
+        id: 'resume-all',
+        label: '全部继续',
+        variant: 'primary',
+        onClick: () => {
+          void resumeAll();
+        },
+      });
+    }
+    actions.push({
+      id: 'cancel-all',
+      label: '全部取消',
+      variant: 'danger',
+      onClick: () => {
+        void cancelAllActive();
+      },
+    });
+
+    const titleText =
+      activeTasks.length > 0
+        ? `歌曲下载（进行中 ${activeTasks.length} 首${pausedTasks.length > 0 ? ` · 暂停 ${pausedTasks.length}` : ''}）`
+        : `歌曲下载（已暂停 ${pausedTasks.length} 首）`;
+    const desiredStatus = activeTasks.length > 0 ? 'running' : 'pending';
+    const patchPayload = {
+      name: titleText,
+      progress: {
+        done: doneInBatch,
+        total: hostTaskTotal,
+        percent: overallPercent,
+        label,
+      },
+      actions,
+    };
+
+    const registerHostTask = () => {
       try {
         hostTaskController = ctx.tasks.register({
-          title: '歌曲批量下载',
-          description: desc,
-          category: 'download',
-          progress: overallProgress,
-          cancellable: true,
-          onCancel: () => {
-            for (const t of [...activeTasks]) {
-              void cancelTask(t);
-            }
-          },
+          id: 'echo-music-download:queue',
+          icon: ICONS.download,
+          status: desiredStatus,
+          retention: 'transient',
+          ...patchPayload,
         });
+        hostTaskStatus = desiredStatus;
       } catch {}
+    };
+
+    if (
+      !hostTaskController ||
+      hostTaskController.active === false ||
+      (hostTaskStatus === 'running' && desiredStatus === 'pending')
+    ) {
+      registerHostTask();
+    } else if (hostTaskStatus === 'pending' && desiredStatus === 'running') {
+      try {
+        if (typeof hostTaskController.start === 'function') {
+          const started = hostTaskController.start(patchPayload);
+          if (started !== false) {
+            hostTaskStatus = 'running';
+          } else {
+            registerHostTask();
+          }
+        } else {
+          registerHostTask();
+        }
+      } catch {
+        registerHostTask();
+      }
     } else {
       try {
-        hostTaskController.update({
-          title: `歌曲下载（剩余 ${activeTasks.length} 首）`,
-          description: desc,
-          progress: overallProgress,
-        });
+        hostTaskController.update(patchPayload);
       } catch {}
     }
   };
@@ -1014,6 +1205,7 @@ const createDownloadStore = (ctx) => {
         STORAGE_TASKS,
         state.tasks.map((t) => ({
           id: t.id,
+          order: t.order ?? 0,
           hash: t.hash,
           name: t.name,
           artist: t.artist,
@@ -1026,8 +1218,8 @@ const createDownloadStore = (ctx) => {
           saveDir: t.saveDir,
           state: t.state,
           percent: t.percent,
-          speed: t.speed,
-          eta: t.eta,
+          speed: '',
+          eta: '',
           quality: t.quality,
           format: t.format,
           sourceLabel: t.sourceLabel || '酷狗官方',
@@ -1108,6 +1300,17 @@ const createDownloadStore = (ctx) => {
       if (state.existingFilesSet.has(`file:${cleanFolder}/${base}`)) return true;
     }
     return state.existingFilesSet.has(`file:${base}`);
+  };
+
+  const isSongInActiveQueue = (song) => {
+    const meta = buildSongMeta(song);
+    if (!meta.hash) return false;
+    const lowerHash = meta.hash.toLowerCase();
+    return state.tasks.some(
+      (t) =>
+        String(t.hash || '').toLowerCase() === lowerHash &&
+        ['queued', 'launching', 'downloading', 'tagging', 'paused'].includes(t.state),
+    );
   };
 
   const stopPolling = (task) => {
@@ -1247,33 +1450,56 @@ const createDownloadStore = (ctx) => {
     }
   };
 
-  const failTask = (task, error) => {
+  const failTask = (task, error, expectedToken = null) => {
+    if (!task) return;
+    if (expectedToken != null && task._runToken !== expectedToken) return;
+    if (task.state === 'canceled' || task.state === 'done') return;
     task.state = 'failed';
     task.error = error || '下载失败';
     task.percent = null;
     task.speed = '';
     task.eta = '';
+    task.bytesPerSecond = 0;
     task.updatedAt = Date.now();
     stopPolling(task);
     cleanupLog(task);
-    state.runningCount = Math.max(0, state.runningCount - 1);
+    detachNativeHandle(task, { clearHandle: true });
+    releaseRunningSlot(task);
     persist();
     ctx.toast.danger(`${task.name}：${task.error}`);
     pump();
   };
 
-  const finalizeTaskSuccess = async (task, relativePath, finalPath) => {
+  const finalizeTaskSuccess = async (task, relativePath, finalPath, expectedToken = null) => {
+    if (!task) return;
+    if (expectedToken != null && task._runToken !== expectedToken) return;
+    if (task.state === 'canceled' || task.state === 'done') {
+      releaseRunningSlot(task);
+      pump();
+      return;
+    }
     stopPolling(task);
     cleanupLog(task);
+    task.speed = '';
+    task.eta = '';
+    task.bytesPerSecond = 0;
     try {
       await postProcessTaskFile(task, relativePath);
     } catch (e) {
       console.warn('[echo-music-download] 后处理异常:', e);
     }
+    if (expectedToken != null && task._runToken !== expectedToken) return;
+    if (task.state === 'canceled') {
+      releaseRunningSlot(task);
+      pump();
+      return;
+    }
     task.state = 'done';
     task.percent = 100;
     task.speed = '';
     task.eta = '';
+    task.bytesPerSecond = 0;
+    task.error = '';
     task.finalPath = finalPath || `${task.saveDir}/${relativePath}`;
     task.updatedAt = Date.now();
     if (task.hash) state.existingFilesSet.add(`hash:${String(task.hash).toLowerCase()}`);
@@ -1281,7 +1507,8 @@ const createDownloadStore = (ctx) => {
       const noExt = relativePath.replace(/\.[^.]+$/, '').toLowerCase();
       state.existingFilesSet.add(`file:${noExt}`);
     }
-    state.runningCount = Math.max(0, state.runningCount - 1);
+    hostTaskCompletedInBatch += 1;
+    releaseRunningSlot(task);
     persist();
     ctx.toast.success(`${task.name} 下载完成`);
     pump();
@@ -1335,11 +1562,13 @@ const createDownloadStore = (ctx) => {
     return result;
   };
 
-  const startPolling = (task) => {
+  const startPolling = (task, myToken) => {
     stopPolling(task);
     const poll = async () => {
+      if (task._runToken !== myToken || task.state !== 'downloading') return;
       try {
         const res = await ctx.fs.readTextFile(task.logAbs, { maxBytes: LOG_MAX_BYTES });
+        if (task._runToken !== myToken || task.state !== 'downloading') return;
         if (res && res.ok && typeof res.content === 'string') {
           const size = res.size ?? 0;
           const parsed = parseLog(res.content);
@@ -1349,11 +1578,12 @@ const createDownloadStore = (ctx) => {
               task,
               task.fileName,
               parsed.finalPath || `${task.saveDir}/${task.fileName}`,
+              myToken,
             );
             return;
           }
           if (parsed.failed) {
-            failTask(task, parsed.error);
+            failTask(task, parsed.error, myToken);
             return;
           }
           if (parsed.percent != null || size !== task._lastSize) {
@@ -1362,27 +1592,35 @@ const createDownloadStore = (ctx) => {
           }
           if (parsed.percent != null) {
             task.percent = parsed.percent;
-            task.speed = parsed.speed || '';
+            task.speed = parsed.speed ? `${parsed.speed}/s` : '';
+            task.bytesPerSecond = parseSpeedToBytes(parsed.speed);
             task.eta = parsed.eta || '';
             syncHostTaskPanel();
           }
         }
         if (Date.now() - task._lastActivity > STALL_TIMEOUT_MS) {
           if (task.pid) {
+            const pid = task.pid;
+            task.pid = null;
             try {
-              await ctx.process.terminate(task.pid);
+              await ctx.process?.terminate?.(pid);
             } catch {}
           }
-          failTask(task, '下载长时间无进度，已停止（请检查网络或重试）');
+          failTask(task, '下载长时间无进度，已停止（请检查网络或重试）', myToken);
           return;
         }
       } catch {}
-      task._timer = setTimeout(poll, POLL_INTERVAL_MS);
+      if (task._runToken === myToken && task.state === 'downloading') {
+        task._timer = setTimeout(poll, POLL_INTERVAL_MS);
+      }
     };
     task._timer = setTimeout(poll, POLL_INTERVAL_MS);
   };
 
   const launchAria2 = async (task, url) => {
+    if (typeof ctx?.process?.launch !== 'function') {
+      return { ok: false, error: '当前宿主环境不支持启动 aria2c 进程' };
+    }
     const pluginDir = String(ctx.descriptor?.directory ?? '').replace(/[\\/]+$/, '');
     const logRel = `logs/task-${task.id}.log`;
     const logAbs = `${pluginDir}/${logRel}`;
@@ -1418,7 +1656,12 @@ const createDownloadStore = (ctx) => {
       url,
     ];
 
-    const res = await ctx.process.launch({ executable: 'bin/aria2c.exe', args });
+    let res;
+    try {
+      res = await ctx.process.launch({ executable: 'bin/aria2c.exe', args });
+    } catch (err) {
+      return { ok: false, error: err?.message || '启动 aria2c 失败' };
+    }
     if (res && res.ok) return { ok: true, pid: res.pid };
     return { ok: false, error: res?.error, canceled: res?.canceled };
   };
@@ -1474,8 +1717,144 @@ const createDownloadStore = (ctx) => {
     return null;
   };
 
+  const attachNativeSubscriber = (task, handle, myToken, { ignoreInitialPaused = false } = {}) => {
+    detachNativeHandle(task, { clearHandle: false });
+    task._handle = handle;
+    let inSyncSubscribe = true;
+    let terminatedSynchronously = false;
+
+    const unsub = handle.subscribe((s) => {
+      if (!s || task._handle !== handle || task._runToken !== myToken) return;
+      if (task.state === 'canceled' || task.state === 'done') return;
+
+      if (s.totalBytes && s.totalBytes > 0) {
+        task.percent = Math.min(100, Math.round((s.receivedBytes / s.totalBytes) * 100));
+      }
+      const isTransferring = ['downloading', 'connecting', 'verifying', 'committing'].includes(
+        s.state,
+      );
+      task.bytesPerSecond = isTransferring ? Number(s.bytesPerSecond || 0) : 0;
+      task.speed = task.bytesPerSecond > 0 ? `${formatBytes(task.bytesPerSecond)}/s` : '';
+      task.eta = isTransferring && s.remainingSeconds ? formatEta(s.remainingSeconds) : '';
+      syncHostTaskPanel();
+
+      if (s.state === 'completed') {
+        terminatedSynchronously = inSyncSubscribe;
+        const actualName =
+          s.result?.file?.kind === 'directory-file' && s.result.file.relativePath
+            ? s.result.file.relativePath
+            : task.fileName;
+        task.fileName = actualName;
+        const finalPath = `${state.saveDir}/${actualName}`;
+        const completedId = handle.id;
+        detachNativeHandle(task, { clearHandle: true });
+        if (completedId && typeof ctx.net?.downloads?.remove === 'function') {
+          try {
+            const rm = ctx.net.downloads.remove(completedId);
+            if (rm && typeof rm.catch === 'function') rm.catch(() => {});
+          } catch {}
+        }
+        void finalizeTaskSuccess(task, actualName, finalPath, myToken);
+      } else if (s.state === 'canceled') {
+        terminatedSynchronously = inSyncSubscribe;
+        detachNativeHandle(task, { clearHandle: true });
+        task.state = 'canceled';
+        task.error = '';
+        task.note = '已取消';
+        task.speed = '';
+        task.eta = '';
+        task.bytesPerSecond = 0;
+        task.updatedAt = Date.now();
+        releaseRunningSlot(task);
+        persist();
+        pump();
+      } else if (s.state === 'failed' || s.state === 'interrupted') {
+        if (task.state === 'paused' || task.state === 'canceled') return;
+        terminatedSynchronously = inSyncSubscribe;
+        detachNativeHandle(task, { clearHandle: true });
+        failTask(task, s.error?.message || '原生下载中断', myToken);
+      } else if (s.state === 'paused') {
+        if (inSyncSubscribe && ignoreInitialPaused) return;
+        task.state = 'paused';
+        task.speed = '';
+        task.eta = '';
+        task.bytesPerSecond = 0;
+        task.updatedAt = Date.now();
+        releaseRunningSlot(task);
+        persist();
+        pump();
+      } else if (isTransferring) {
+        if (task.state !== 'paused' && task.state !== 'tagging') {
+          task.state = 'downloading';
+        }
+      }
+    });
+
+    inSyncSubscribe = false;
+    if (terminatedSynchronously) {
+      try {
+        unsub();
+      } catch {}
+      task._unsub = null;
+    } else {
+      task._unsub = unsub;
+    }
+  };
+
+  const resumeNativeHandle = async (task) => {
+    const myToken = (task._runToken || 0) + 1;
+    task._runToken = myToken;
+    task._resumeHandle = false;
+
+    const handle = task._handle;
+    if (!handle || typeof handle.resume !== 'function') {
+      await startTask(task);
+      return;
+    }
+
+    task.state = 'downloading';
+    task.error = '';
+    if (task.note === '已暂停' || task.note === '已加入队列（暂未开始）') task.note = '';
+    task.updatedAt = Date.now();
+    persist();
+
+    try {
+      await handle.resume();
+      if (task._runToken !== myToken) {
+        if (task.state === 'paused' && typeof handle.pause === 'function') {
+          try {
+            await handle.pause();
+          } catch {}
+        } else if (task.state === 'canceled' && typeof handle.cancel === 'function') {
+          try {
+            await handle.cancel();
+          } catch {}
+        }
+        return;
+      }
+      attachNativeSubscriber(task, handle, myToken, { ignoreInitialPaused: true });
+    } catch (err) {
+      if (task._runToken !== myToken) return;
+      console.warn('[echo-music-download] 原生断点恢复失败，重新解析下载地址:', err);
+      detachNativeHandle(task, { clearHandle: true });
+      await startTask(task);
+    }
+  };
+
   const startTask = async (task) => {
+    const myToken = (task._runToken || 0) + 1;
+    task._runToken = myToken;
+    task._resumeHandle = false;
     task.state = 'launching';
+    task.error = '';
+    if (
+      task.note === '已暂停' ||
+      task.note === '已加入队列（暂未开始）' ||
+      task.note === '已取消' ||
+      task.note === '应用重启后已自动暂停，点击继续可恢复'
+    ) {
+      task.note = '';
+    }
     task.updatedAt = Date.now();
     persist();
 
@@ -1483,12 +1862,15 @@ const createDownloadStore = (ctx) => {
     try {
       resolved = await resolveDownloadUrl(task);
     } catch (error) {
-      failTask(task, getApiErrorMessage(error, '获取播放地址失败'));
+      if (task._runToken !== myToken) return;
+      failTask(task, getApiErrorMessage(error, '获取播放地址失败'), myToken);
       return;
     }
 
+    if (task._runToken !== myToken) return;
+
     if (!resolved || !resolved.url) {
-      failTask(task, '未获取到可下载音源（版权受限且解灰通道未命中）');
+      failTask(task, '未获取到可下载音源（版权受限且解灰通道未命中）', myToken);
       return;
     }
 
@@ -1513,6 +1895,7 @@ const createDownloadStore = (ctx) => {
             purpose: '选择歌曲下载保存目录',
             persist: true,
           });
+          if (task._runToken !== myToken) return;
           if (reauth && reauth.ok !== false && !reauth.canceled && reauth.directory) {
             state.saveDirRef = reauth.directory;
             state.saveDir =
@@ -1521,6 +1904,8 @@ const createDownloadStore = (ctx) => {
             await ctx.storage.set(STORAGE_SAVE_DIR, state.saveDir);
           }
         }
+        if (task._runToken !== myToken) return;
+
         let handle;
         const dlRequest = {
           url,
@@ -1533,6 +1918,7 @@ const createDownloadStore = (ctx) => {
         try {
           handle = await ctx.net.download(dlRequest);
         } catch (dlErr) {
+          if (task._runToken !== myToken) return;
           if (
             typeof fsGrants.reauthorizeDirectoryGrant === 'function' &&
             /GRANT|DIRECTORY|ACCESS|UNAVAILABLE/i.test(
@@ -1544,6 +1930,7 @@ const createDownloadStore = (ctx) => {
               purpose: '恢复歌曲下载保存目录访问权限',
               persist: true,
             });
+            if (task._runToken !== myToken) return;
             if (reauth && reauth.ok !== false && !reauth.canceled && reauth.directory) {
               state.saveDirRef = reauth.directory;
               state.saveDir =
@@ -1558,50 +1945,37 @@ const createDownloadStore = (ctx) => {
             throw dlErr;
           }
         }
-        task._handle = handle;
-        task._unsub = handle.subscribe((s) => {
-          if (s.totalBytes && s.totalBytes > 0) {
-            task.percent = Math.min(100, Math.round((s.receivedBytes / s.totalBytes) * 100));
-          }
-          task.speed = s.bytesPerSecond ? `${formatBytes(s.bytesPerSecond)}/s` : '';
-          task.eta = s.remainingSeconds ? formatEta(s.remainingSeconds) : '';
-          syncHostTaskPanel();
 
-          if (s.state === 'completed') {
-            const actualName =
-              s.result?.file?.kind === 'directory-file' && s.result.file.relativePath
-                ? s.result.file.relativePath
-                : task.fileName;
-            task.fileName = actualName;
-            const finalPath = `${state.saveDir}/${actualName}`;
-            if (typeof task._unsub === 'function') {
-              try {
-                task._unsub();
-              } catch {}
-              task._unsub = null;
-            }
-            void finalizeTaskSuccess(task, actualName, finalPath);
-          } else if (['failed', 'canceled', 'interrupted'].includes(s.state)) {
-            if (typeof task._unsub === 'function') {
-              try {
-                task._unsub();
-              } catch {}
-              task._unsub = null;
-            }
-            failTask(task, s.error?.message || '原生下载中断');
-          } else if (s.state === 'paused') {
-            task.state = 'paused';
-            persist();
-          } else if (s.state === 'downloading') {
-            task.state = 'downloading';
+        if (task._runToken !== myToken) {
+          if (task.state === 'paused' && typeof handle?.pause === 'function') {
+            task._handle = handle;
+            try {
+              await handle.pause();
+            } catch {}
+          } else if (typeof handle?.cancel === 'function') {
+            try {
+              await handle.cancel();
+            } catch {}
           }
-        });
+          return;
+        }
+
+        attachNativeSubscriber(task, handle, myToken);
       } catch (err) {
+        if (task._runToken !== myToken) return;
         console.warn('[echo-music-download] 原生下载异常，回退 aria2c:', err);
         task.engine = 'aria2c';
         const launch = await launchAria2(task, url);
+        if (task._runToken !== myToken) {
+          if (launch.ok && launch.pid) {
+            try {
+              await ctx.process?.terminate?.(launch.pid);
+            } catch {}
+          }
+          return;
+        }
         if (!launch.ok) {
-          failTask(task, launch.error || '启动下载失败');
+          failTask(task, launch.error || '启动下载失败', myToken);
           return;
         }
         task.pid = launch.pid;
@@ -1610,7 +1984,7 @@ const createDownloadStore = (ctx) => {
         task._lastSize = 0;
         task._lastActivity = Date.now();
         persist();
-        startPolling(task);
+        startPolling(task, myToken);
       }
       return;
     }
@@ -1618,11 +1992,19 @@ const createDownloadStore = (ctx) => {
     // 备选降级：aria2c
     task.engine = 'aria2c';
     const launch = await launchAria2(task, url);
+    if (task._runToken !== myToken) {
+      if (launch.ok && launch.pid) {
+        try {
+          await ctx.process?.terminate?.(launch.pid);
+        } catch {}
+      }
+      return;
+    }
     if (!launch.ok) {
       if (launch.canceled) {
-        failTask(task, '已取消启动 aria2c；请在弹窗中允许插件运行本地程序');
+        failTask(task, '已取消启动 aria2c；请在弹窗中允许插件运行本地程序', myToken);
       } else {
-        failTask(task, launch.error || '启动 aria2c 失败');
+        failTask(task, launch.error || '启动 aria2c 失败', myToken);
       }
       return;
     }
@@ -1633,23 +2015,27 @@ const createDownloadStore = (ctx) => {
     task._lastSize = 0;
     task._lastActivity = Date.now();
     persist();
-    startPolling(task);
+    startPolling(task, myToken);
   };
 
   const pump = () => {
     while (state.runningCount < state.maxConcurrent) {
       const next = state.tasks.find((t) => t.state === 'queued');
       if (!next) break;
-      state.runningCount += 1;
-      void startTask(next);
+      acquireRunningSlot(next);
+      if (next._resumeHandle && next._handle && typeof next._handle.resume === 'function') {
+        void resumeNativeHandle(next);
+      } else {
+        void startTask(next);
+      }
     }
     syncHostTaskPanel();
   };
 
-  const enqueueSongs = async (songs, { playlistName = '' } = {}) => {
+  const enqueueSongs = async (songs, { playlistName = '', startPaused = false } = {}) => {
     if (!state.saveDir) {
       ctx.toast.info('请先选择歌曲保存目录');
-      return;
+      return { added: 0, skippedActive: 0, skippedExisting: 0, startPaused };
     }
     if (state.options.skipExisting) {
       await refreshExistingFiles();
@@ -1660,15 +2046,19 @@ const createDownloadStore = (ctx) => {
     let added = 0;
     let skippedActive = 0;
     let skippedExisting = 0;
+    const seenHashes = new Set();
 
-    for (const song of songs) {
+    for (const song of Array.isArray(songs) ? songs : []) {
       const meta = buildSongMeta(song);
       if (!meta.hash || !meta.title) continue;
+      const hashKey = meta.hash.toLowerCase();
+      if (seenHashes.has(hashKey)) continue;
+      seenHashes.add(hashKey);
 
       const dupActive = state.tasks.find(
         (t) =>
-          t.hash === meta.hash &&
-          ['queued', 'launching', 'downloading', 'tagging'].includes(t.state),
+          String(t.hash || '').toLowerCase() === hashKey &&
+          ['queued', 'launching', 'downloading', 'tagging', 'paused'].includes(t.state),
       );
       if (dupActive) {
         skippedActive += 1;
@@ -1681,8 +2071,10 @@ const createDownloadStore = (ctx) => {
       }
 
       state.nextSeq += 1;
-      state.tasks.unshift({
-        id: `t${Date.now()}-${state.nextSeq}`,
+      const now = Date.now();
+      state.tasks.push({
+        id: `t${now}-${state.nextSeq}`,
+        order: state.nextSeq,
         hash: meta.hash,
         name: meta.artist ? `${meta.artist} - ${meta.title}` : meta.title,
         artist: meta.artist,
@@ -1693,20 +2085,24 @@ const createDownloadStore = (ctx) => {
         subfolder,
         fileName: '',
         saveDir: state.saveDir,
-        state: 'queued',
+        state: startPaused ? 'paused' : 'queued',
         percent: null,
         speed: '',
         eta: '',
+        bytesPerSecond: 0,
         quality: state.quality,
         format: state.nameFormat,
         sourceLabel: '酷狗官方',
         tagStatus: '',
         lrcStatus: '',
-        note: '',
+        note: startPaused ? '已加入队列（暂未开始）' : '',
         error: '',
         finalPath: '',
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
+        createdAt: now,
+        updatedAt: now,
+        _countedRunning: false,
+        _runToken: 0,
+        _resumeHandle: false,
       });
       added += 1;
     }
@@ -1714,31 +2110,358 @@ const createDownloadStore = (ctx) => {
     if (added > 0) {
       persist();
       const extraMsg =
-        skippedExisting > 0 ? `（已智能跳过 ${skippedExisting} 首已下载歌曲）` : '';
-      ctx.toast.success(`已加入 ${added} 首下载任务${extraMsg}`);
-      pump();
+        skippedExisting > 0 ? `（已自动跳过 ${skippedExisting} 首已存在歌曲）` : '';
+      if (startPaused) {
+        ctx.toast.success(`已加入 ${added} 首到队列并暂停${extraMsg}`);
+      } else {
+        ctx.toast.success(`已加入 ${added} 首下载任务${extraMsg}`);
+        pump();
+      }
     } else if (skippedExisting > 0) {
       ctx.toast.info(`所选 ${skippedExisting} 首歌曲均已存在于本地目录，无需重复下载`);
     } else if (skippedActive > 0) {
-      ctx.toast.info(`${skippedActive} 首歌曲正在下载队列中`);
+      ctx.toast.info(`${skippedActive} 首歌曲已在下载队列中`);
     }
+
+    return { added, skippedActive, skippedExisting, startPaused };
+  };
+
+  // 两阶段原子暂停（先同步变更所有目标状态并释放槽位，再异步停止句柄/进程，避免 pump 误拉起被暂停的排队任务）
+  const pauseTasksInternal = async (targets, { silent = false, summaryLabel = '' } = {}) => {
+    const valid = targets.filter((t) =>
+      t && ['queued', 'launching', 'downloading'].includes(t.state),
+    );
+    if (valid.length === 0) return 0;
+
+    const ops = [];
+    const now = Date.now();
+    for (const task of valid) {
+      const prevState = task.state;
+      task._runToken = (task._runToken || 0) + 1;
+      task._resumeHandle = false;
+      stopPolling(task);
+
+      let handleToPause = null;
+      let pidToKill = null;
+      if (prevState === 'downloading') {
+        handleToPause = detachNativeHandle(task, { clearHandle: false });
+        if (task.pid) {
+          pidToKill = task.pid;
+          task.pid = null;
+        }
+      }
+
+      task.state = 'paused';
+      task.speed = '';
+      task.eta = '';
+      task.bytesPerSecond = 0;
+      task.updatedAt = now;
+      releaseRunningSlot(task);
+
+      if (handleToPause && typeof handleToPause.pause === 'function') {
+        ops.push(handleToPause.pause().catch(() => {}));
+      } else if (pidToKill) {
+        ops.push(Promise.resolve(ctx.process?.terminate?.(pidToKill)).catch(() => {}));
+      }
+    }
+
+    persist();
+    if (ops.length > 0) {
+      await Promise.allSettled(ops);
+    }
+    pump();
+
+    if (!silent) {
+      if (summaryLabel) {
+        ctx.toast.info(summaryLabel.replace('{n}', String(valid.length)));
+      } else if (valid.length === 1) {
+        ctx.toast.info(`已暂停：${valid[0].name}`);
+      } else {
+        ctx.toast.info(`已暂停 ${valid.length} 个下载任务`);
+      }
+    }
+    return valid.length;
+  };
+
+  const pauseTask = async (task, { silent = false } = {}) => {
+    if (!task) return false;
+    if (task.state === 'tagging') {
+      if (!silent) ctx.toast.info('正在写入音频标签，即将完成');
+      return false;
+    }
+    const count = await pauseTasksInternal([task], { silent });
+    return count > 0;
+  };
+
+  const resumeTask = async (task, { silent = false } = {}) => {
+    if (!task || task.state !== 'paused') return false;
+    task.error = '';
+    if (
+      task.note === '已暂停' ||
+      task.note === '已加入队列（暂未开始）' ||
+      task.note === '应用重启后已自动暂停，点击继续可恢复'
+    ) {
+      task.note = '';
+    }
+    task.updatedAt = Date.now();
+
+    if (task._handle && typeof task._handle.resume === 'function') {
+      if (state.runningCount < state.maxConcurrent) {
+        acquireRunningSlot(task);
+        void resumeNativeHandle(task);
+      } else {
+        task._resumeHandle = true;
+        task.state = 'queued';
+        persist();
+        pump();
+      }
+    } else {
+      task._resumeHandle = false;
+      task.state = 'queued';
+      persist();
+      pump();
+    }
+
+    if (!silent) {
+      ctx.toast.info(`已恢复：${task.name}`);
+    }
+    return true;
+  };
+
+  const resumeTasksInternal = async (targets, { silent = false, summaryLabel = '' } = {}) => {
+    const valid = targets.filter((t) => t && t.state === 'paused');
+    if (valid.length === 0) return 0;
+
+    const now = Date.now();
+    for (const task of valid) {
+      task.error = '';
+      if (
+        task.note === '已暂停' ||
+        task.note === '已加入队列（暂未开始）' ||
+        task.note === '应用重启后已自动暂停，点击继续可恢复'
+      ) {
+        task.note = '';
+      }
+      task._resumeHandle = Boolean(task._handle && typeof task._handle.resume === 'function');
+      task.state = 'queued';
+      task.updatedAt = now;
+    }
+
+    persist();
+    pump();
+
+    if (!silent) {
+      if (summaryLabel) {
+        ctx.toast.info(summaryLabel.replace('{n}', String(valid.length)));
+      } else {
+        ctx.toast.success(`已恢复 ${valid.length} 个下载任务`);
+      }
+    }
+    return valid.length;
+  };
+
+  // 两阶段原子取消（绝不触发 toast.danger，干净设为 canceled 状态）
+  const cancelTasksInternal = async (targets, { silent = false, summaryLabel = '' } = {}) => {
+    const valid = targets.filter(
+      (t) => t && ['queued', 'launching', 'downloading', 'tagging', 'paused'].includes(t.state),
+    );
+    if (valid.length === 0) return 0;
+
+    const ops = [];
+    const now = Date.now();
+    for (const task of valid) {
+      task._runToken = (task._runToken || 0) + 1;
+      stopPolling(task);
+      cleanupLog(task);
+      const handle = detachNativeHandle(task, { clearHandle: true });
+      const pid = task.pid;
+      task.pid = null;
+
+      task.state = 'canceled';
+      task.error = '';
+      task.note = '已取消';
+      task.speed = '';
+      task.eta = '';
+      task.bytesPerSecond = 0;
+      task.updatedAt = now;
+      releaseRunningSlot(task);
+
+      if (handle && typeof handle.cancel === 'function') {
+        const handleId = handle.id;
+        ops.push(
+          handle
+            .cancel()
+            .catch(() => {})
+            .finally(() => {
+              if (handleId && typeof ctx.net?.downloads?.remove === 'function') {
+                return Promise.resolve(ctx.net.downloads.remove(handleId)).catch(() => {});
+              }
+              return undefined;
+            }),
+        );
+      }
+      if (pid) {
+        ops.push(Promise.resolve(ctx.process?.terminate?.(pid)).catch(() => {}));
+      }
+    }
+
+    persist();
+    if (ops.length > 0) {
+      await Promise.allSettled(ops);
+    }
+    pump();
+
+    if (!silent) {
+      if (summaryLabel) {
+        ctx.toast.info(summaryLabel.replace('{n}', String(valid.length)));
+      } else if (valid.length === 1) {
+        ctx.toast.info(`已取消：${valid[0].name}`);
+      } else {
+        ctx.toast.info(`已取消 ${valid.length} 个任务`);
+      }
+    }
+    return valid.length;
+  };
+
+  const cancelTask = async (task, { silent = false } = {}) => {
+    if (!task) return false;
+    const count = await cancelTasksInternal([task], { silent });
+    return count > 0;
+  };
+
+  // 全局快捷控制
+  const pauseAll = async () => {
+    const targets = state.tasks.filter((t) =>
+      ['queued', 'launching', 'downloading'].includes(t.state),
+    );
+    if (targets.length === 0) {
+      ctx.toast.info('当前没有可暂停的下载任务');
+      return 0;
+    }
+    return pauseTasksInternal(targets, { summaryLabel: '已全部暂停（共 {n} 个任务）' });
+  };
+
+  const resumeAll = async () => {
+    const targets = state.tasks.filter((t) => t.state === 'paused');
+    if (targets.length === 0) {
+      ctx.toast.info('当前没有已暂停的任务');
+      return 0;
+    }
+    return resumeTasksInternal(targets, { summaryLabel: '已恢复 {n} 个暂停任务' });
+  };
+
+  const cancelAllActive = async () => {
+    const targets = state.tasks.filter((t) =>
+      ['queued', 'launching', 'downloading', 'paused'].includes(t.state),
+    );
+    if (targets.length === 0) {
+      ctx.toast.info('当前没有进行中或已暂停的任务');
+      return 0;
+    }
+    return cancelTasksInternal(targets, { summaryLabel: '已取消全部 {n} 个任务' });
+  };
+
+  // 批量选中任务控制
+  const batchPause = async (taskIds) => {
+    const idSet = normalizeTaskIdSet(taskIds);
+    const targets = state.tasks.filter(
+      (t) => idSet.has(t.id) && ['queued', 'launching', 'downloading'].includes(t.state),
+    );
+    if (targets.length === 0) {
+      ctx.toast.info('所选任务中没有可暂停的项目');
+      return 0;
+    }
+    return pauseTasksInternal(targets, { summaryLabel: '已批量暂停 {n} 个任务' });
+  };
+
+  const batchResume = async (taskIds) => {
+    const idSet = normalizeTaskIdSet(taskIds);
+    const targets = state.tasks.filter((t) => idSet.has(t.id) && t.state === 'paused');
+    if (targets.length === 0) {
+      ctx.toast.info('所选任务中没有已暂停的项目');
+      return 0;
+    }
+    return resumeTasksInternal(targets, { summaryLabel: '已批量恢复 {n} 个任务' });
+  };
+
+  const batchCancel = async (taskIds) => {
+    const idSet = normalizeTaskIdSet(taskIds);
+    const targets = state.tasks.filter(
+      (t) => idSet.has(t.id) && ['queued', 'launching', 'downloading', 'paused'].includes(t.state),
+    );
+    if (targets.length === 0) {
+      ctx.toast.info('所选任务中没有可取消的项目');
+      return 0;
+    }
+    return cancelTasksInternal(targets, { summaryLabel: '已批量取消 {n} 个任务' });
+  };
+
+  const batchRetry = (taskIds) => {
+    const idSet = normalizeTaskIdSet(taskIds);
+    const targets = state.tasks.filter(
+      (t) => idSet.has(t.id) && ['failed', 'canceled', 'done'].includes(t.state),
+    );
+    if (targets.length === 0) {
+      ctx.toast.info('所选任务中没有可重新下载的项目');
+      return 0;
+    }
+    const now = Date.now();
+    for (const task of targets) {
+      detachNativeHandle(task, { clearHandle: true });
+      stopPolling(task);
+      task.state = 'queued';
+      task.percent = null;
+      task.speed = '';
+      task.eta = '';
+      task.bytesPerSecond = 0;
+      task.tagStatus = '';
+      task.lrcStatus = '';
+      task.note = '';
+      task.error = '';
+      task.finalPath = '';
+      task.updatedAt = now;
+    }
+    persist();
+    pump();
+    ctx.toast.success(`已重新加入队列 ${targets.length} 个任务`);
+    return targets.length;
+  };
+
+  const batchRemove = async (taskIds) => {
+    const idSet = normalizeTaskIdSet(taskIds);
+    const matched = state.tasks.filter((t) => idSet.has(t.id));
+    if (matched.length === 0) return 0;
+
+    const activeToCancel = matched.filter((t) =>
+      ['queued', 'launching', 'downloading', 'tagging', 'paused'].includes(t.state),
+    );
+    if (activeToCancel.length > 0) {
+      await cancelTasksInternal(activeToCancel, { silent: true });
+    }
+
+    const before = state.tasks.length;
+    state.tasks = state.tasks.filter((t) => !idSet.has(t.id));
+    const removed = before - state.tasks.length;
+    if (removed > 0) {
+      persist();
+      ctx.toast.info(`已移除 ${removed} 条任务记录`);
+    }
+    return removed;
   };
 
   const retryTask = async (task) => {
-    if (task._handle && typeof task._handle.retry === 'function') {
-      task.state = 'downloading';
-      task.error = '';
-      persist();
-      try {
-        await task._handle.retry();
-        return;
-      } catch {}
+    if (!task) return false;
+    if (['queued', 'launching', 'downloading', 'tagging'].includes(task.state)) return false;
+    if (task.state === 'paused') {
+      return resumeTask(task);
     }
-    if (['queued', 'launching', 'downloading', 'tagging'].includes(task.state)) return;
+    detachNativeHandle(task, { clearHandle: true });
+    stopPolling(task);
     task.state = 'queued';
     task.percent = null;
     task.speed = '';
     task.eta = '';
+    task.bytesPerSecond = 0;
     task.tagStatus = '';
     task.lrcStatus = '';
     task.note = '';
@@ -1747,70 +2470,61 @@ const createDownloadStore = (ctx) => {
     task.updatedAt = Date.now();
     persist();
     pump();
+    return true;
   };
 
   const retryAllFailed = () => {
     const failed = state.tasks.filter((t) => t.state === 'failed');
     if (failed.length === 0) {
       ctx.toast.info('当前没有失败的任务');
-      return;
+      return 0;
     }
+    const now = Date.now();
     for (const t of failed) {
+      detachNativeHandle(t, { clearHandle: true });
+      stopPolling(t);
       t.state = 'queued';
       t.percent = null;
       t.speed = '';
       t.eta = '';
+      t.bytesPerSecond = 0;
+      t.tagStatus = '';
+      t.lrcStatus = '';
+      t.note = '';
       t.error = '';
-      t.updatedAt = Date.now();
+      t.updatedAt = now;
     }
     persist();
     pump();
     ctx.toast.success(`已重新开始 ${failed.length} 个失败任务`);
+    return failed.length;
   };
 
-  const cancelTask = async (task) => {
-    if (typeof task._unsub === 'function') {
-      try {
-        task._unsub();
-      } catch {}
-      task._unsub = null;
-    }
-    if (task._handle && typeof task._handle.cancel === 'function') {
-      try {
-        await task._handle.cancel();
-      } catch {}
-    }
-    if (task.state === 'downloading' || task.state === 'launching' || task.state === 'tagging') {
-      if (task.pid) {
-        try {
-          await ctx.process.terminate(task.pid);
-        } catch {}
-      }
-      failTask(task, '已取消');
-    } else if (task.state === 'queued') {
-      task.state = 'failed';
-      task.error = '已取消';
-      task.updatedAt = Date.now();
-      persist();
-    }
-  };
-
-  const removeTask = (task) => {
-    if (['downloading', 'launching', 'tagging'].includes(task.state)) {
-      void cancelTask(task);
+  const removeTask = async (task) => {
+    if (!task) return false;
+    if (['queued', 'launching', 'downloading', 'tagging', 'paused'].includes(task.state)) {
+      await cancelTask(task, { silent: true });
     }
     const idx = state.tasks.findIndex((t) => t.id === task.id);
-    if (idx >= 0) state.tasks.splice(idx, 1);
-    persist();
+    if (idx >= 0) {
+      state.tasks.splice(idx, 1);
+      persist();
+      return true;
+    }
+    return false;
   };
 
   const clearFinished = () => {
     const before = state.tasks.length;
-    state.tasks = state.tasks.filter((t) => t.state !== 'done' && t.state !== 'failed');
-    if (state.tasks.length !== before) {
+    state.tasks = state.tasks.filter(
+      (t) => !['done', 'failed', 'canceled'].includes(t.state),
+    );
+    const removed = before - state.tasks.length;
+    if (removed > 0) {
       persist();
-      ctx.toast.success(`已清理 ${before - state.tasks.length} 条已完成/失败记录`);
+      ctx.toast.success(`已清理 ${removed} 条已完成/已取消/失败记录`);
     }
+    return removed;
   };
 
   const chooseSaveDir = async () => {
@@ -1931,59 +2645,90 @@ const createDownloadStore = (ctx) => {
       if (Array.isArray(saved)) {
         state.tasks = saved
           .filter((t) => t && t.id)
-          .map((t) => ({
-            ...t,
-            album: t.album || '',
-            coverUrl: t.coverUrl || '',
-            subfolder: t.subfolder || '',
-            fileName: t.fileName || '',
-            speed: '',
-            eta: '',
-            quality: QUALITY_OPTIONS.some((o) => o.value === t.quality) ? t.quality : '320',
-            format: NAME_FORMAT_OPTIONS.some((o) => o.value === t.format)
-              ? t.format
-              : 'artist-title',
-            sourceLabel: t.sourceLabel || '酷狗官方',
-            tagStatus: t.tagStatus || '',
-            lrcStatus: t.lrcStatus || '',
-            note: t.note || '',
-            ...(['downloading', 'launching', 'tagging'].includes(t.state)
-              ? { state: 'failed', error: '应用已重启，下载中断，请点击重试', percent: null }
-              : {}),
-          }));
+          .map((t, idx) => {
+            const wasInterrupted = ['downloading', 'launching', 'tagging', 'queued'].includes(
+              t.state,
+            );
+            const restoredState =
+              t.state === 'paused'
+                ? 'paused'
+                : t.state === 'canceled'
+                  ? 'canceled'
+                  : wasInterrupted
+                    ? 'paused'
+                    : t.state;
+            return {
+              ...t,
+              order: Number.isFinite(Number(t.order)) ? Number(t.order) : idx + 1,
+              album: t.album || '',
+              coverUrl: t.coverUrl || '',
+              subfolder: t.subfolder || '',
+              fileName: t.fileName || '',
+              speed: '',
+              eta: '',
+              bytesPerSecond: 0,
+              quality: QUALITY_OPTIONS.some((o) => o.value === t.quality) ? t.quality : '320',
+              format: NAME_FORMAT_OPTIONS.some((o) => o.value === t.format)
+                ? t.format
+                : 'artist-title',
+              sourceLabel: t.sourceLabel || '酷狗官方',
+              tagStatus: t.tagStatus || '',
+              lrcStatus: t.lrcStatus || '',
+              note: wasInterrupted
+                ? '应用重启后已自动暂停，点击继续可恢复'
+                : t.note || (t.state === 'canceled' ? '已取消' : ''),
+              error: wasInterrupted || t.state === 'paused' || t.state === 'canceled' ? '' : t.error || '',
+              state: restoredState,
+              _countedRunning: false,
+              _runToken: 0,
+              _resumeHandle: false,
+              _handle: null,
+              _unsub: null,
+            };
+          });
         for (const t of state.tasks) {
           const m = /t\d+-(\d+)$/.exec(t.id);
           if (m) state.nextSeq = Math.max(state.nextSeq, Number(m[1]));
+          if (Number.isFinite(Number(t.order))) {
+            state.nextSeq = Math.max(state.nextSeq, Number(t.order));
+          }
         }
       }
     } catch (e) {
       console.warn('[echo-music-download] 恢复任务失败:', e);
     }
 
+    state.runningCount = 0;
     await refreshExistingFiles();
+    syncHostTaskPanel();
   };
 
   const dispose = () => {
     if (hostTaskController) {
       try {
-        hostTaskController.complete({ description: '插件已卸载' });
+        if (typeof hostTaskController.dismiss === 'function') {
+          hostTaskController.dismiss();
+        } else if (typeof hostTaskController.complete === 'function') {
+          hostTaskController.complete({ description: '插件已卸载' });
+        }
       } catch {}
       hostTaskController = null;
+      hostTaskStatus = null;
+      hostTaskTotal = 0;
+      hostTaskCompletedInBatch = 0;
     }
     for (const t of state.tasks) {
       stopPolling(t);
-      if (typeof t._unsub === 'function') {
-        try {
-          t._unsub();
-        } catch {}
-        t._unsub = null;
-      }
+      detachNativeHandle(t, { clearHandle: true });
       if (['downloading', 'launching', 'tagging'].includes(t.state) && t.pid) {
         try {
-          void ctx.process.terminate(t.pid);
+          void ctx.process?.terminate?.(t.pid);
         } catch {}
+        t.pid = null;
       }
+      t._countedRunning = false;
     }
+    state.runningCount = 0;
   };
 
   return {
@@ -1992,10 +2737,21 @@ const createDownloadStore = (ctx) => {
     saveOptions,
     refreshExistingFiles,
     isSongAlreadyDownloaded,
+    isSongInActiveQueue,
     enqueueSongs,
+    pauseTask,
+    resumeTask,
+    cancelTask,
+    pauseAll,
+    resumeAll,
+    cancelAllActive,
+    batchPause,
+    batchResume,
+    batchCancel,
+    batchRetry,
+    batchRemove,
     retryTask,
     retryAllFailed,
-    cancelTask,
     removeTask,
     clearFinished,
     chooseSaveDir,
@@ -2016,69 +2772,156 @@ const CSS = `
   display: flex;
   flex-direction: column;
   min-height: 0;
+  position: relative;
 }
 .emd-v2-body {
-  padding: 16px 32px 48px;
+  padding: 16px 32px 36px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
 }
 
-/* 顶部快捷条：当前播放与目录状态 */
-.emd-quick-banner {
+/* 顶部未授权目录提示条（仅在未选择保存目录时出现） */
+.emd-dir-alert {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 12px 16px;
-  border-radius: 14px;
-  background: var(--bg-info-card, rgba(128, 128, 128, 0.06));
-  border: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.12));
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: color-mix(in srgb, #f59e0b 10%, var(--bg-info-card, rgba(128, 128, 128, 0.06)));
+  border: 1px solid color-mix(in srgb, #f59e0b 32%, var(--border-subtle, rgba(128, 128, 128, 0.16)));
+  color: var(--color-text-main, inherit);
+  font-size: 12.5px;
   flex-wrap: wrap;
 }
-.emd-quick-track {
+.emd-dir-alert-left {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
   min-width: 0;
-  flex: 1;
-}
-.emd-quick-cover {
-  width: 42px;
-  height: 42px;
-  border-radius: 10px;
-  object-fit: cover;
-  background: var(--bg-card, rgba(128, 128, 128, 0.1));
-  border: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.12));
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--color-primary, #10b981);
-}
-.emd-quick-meta {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.emd-quick-title {
-  font-size: 13.5px;
-  font-weight: 700;
-  color: var(--color-text-main, inherit);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.emd-quick-sub {
-  font-size: 11.5px;
-  color: var(--color-text-secondary, #888);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
-/* 过滤胶囊栏 */
+/* 队列总控栏：过滤页签 + 实时速度 + 搜索 + 显式全局操作 */
+.emd-control-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: var(--bg-info-card, rgba(128, 128, 128, 0.05));
+  border: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.12));
+}
+.emd-control-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.emd-control-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.emd-control-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--border-subtle, rgba(128, 128, 128, 0.2));
+  margin: 0 2px;
+}
+
+/* 语义 1：分段过滤页签 / 单选组（与操作按钮、开关明确区分） */
+.emd-seg-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--control-muted-bg, rgba(128, 128, 128, 0.1));
+  border: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.1));
+  flex-wrap: wrap;
+}
+.emd-seg-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary, #888);
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+  white-space: nowrap;
+}
+.emd-seg-tab:hover {
+  color: var(--color-text-main, inherit);
+}
+.emd-seg-tab-active {
+  background: var(--bg-card, var(--bg-main, rgba(255, 255, 255, 0.92)));
+  color: var(--color-text-main, inherit);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+.emd-seg-count {
+  font-size: 11px;
+  opacity: 0.72;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 实时聚合速率徽章 */
+.emd-speed-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  background: color-mix(in srgb, var(--color-primary, #10b981) 12%, transparent);
+  color: var(--color-primary, #10b981);
+  border: 1px solid color-mix(in srgb, var(--color-primary, #10b981) 25%, transparent);
+}
+.emd-speed-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--color-primary, #10b981);
+  animation: emd-pulse 1.5s ease-in-out infinite;
+}
+@keyframes emd-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.82); }
+}
+
+/* 语义 2：内联 Switch 开关行 */
+.emd-switch-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.emd-switch-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--color-text-main, inherit);
+  cursor: pointer;
+  user-select: none;
+}
+.emd-switch-item-hint {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--color-text-secondary, #888);
+}
+
+/* 工具栏布局 */
 .emd-toolbar {
   display: flex;
   align-items: center;
@@ -2086,34 +2929,15 @@ const CSS = `
   gap: 12px;
   flex-wrap: wrap;
 }
-.emd-pills {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-.emd-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 12px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 600;
-  border: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.15));
-  background: var(--bg-info-card, rgba(128, 128, 128, 0.05));
-  color: var(--color-text-secondary, #888);
+
+/* 复选框（当宿主未暴露 Checkbox 组件时的兜底样式） */
+.emd-native-checkbox {
+  accent-color: var(--color-primary, #10b981);
+  width: 16px;
+  height: 16px;
   cursor: pointer;
-  transition: all 0.15s ease;
-}
-.emd-pill:hover {
-  color: var(--color-text-main, inherit);
-  border-color: color-mix(in srgb, var(--color-primary, #10b981) 40%, transparent);
-}
-.emd-pill-active {
-  background: color-mix(in srgb, var(--color-primary, #10b981) 14%, transparent);
-  border-color: color-mix(in srgb, var(--color-primary, #10b981) 45%, transparent);
-  color: var(--color-primary, #10b981);
+  flex-shrink: 0;
+  margin: 0;
 }
 
 /* 任务卡片列表 */
@@ -2125,19 +2949,33 @@ const CSS = `
 .emd-task-card {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 12px 16px;
+  gap: 12px;
+  padding: 12px 14px;
   border-radius: 14px;
   background: var(--bg-info-card, rgba(128, 128, 128, 0.06));
   border: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.12));
-  transition: border-color 0.16s ease, transform 0.16s ease;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
 }
 .emd-task-card:hover {
-  border-color: color-mix(in srgb, var(--color-primary, #10b981) 35%, var(--border-subtle, rgba(128, 128, 128, 0.2)));
+  border-color: color-mix(in srgb, var(--color-primary, #10b981) 32%, var(--border-subtle, rgba(128, 128, 128, 0.2)));
+}
+.emd-task-card-selected {
+  background: color-mix(in srgb, var(--color-primary, #10b981) 9%, var(--bg-info-card, rgba(128, 128, 128, 0.06)));
+  border-color: color-mix(in srgb, var(--color-primary, #10b981) 52%, transparent);
+}
+.emd-task-card-clickable {
+  cursor: pointer;
+}
+.emd-task-check-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 2px;
 }
 .emd-task-cover {
-  width: 46px;
-  height: 46px;
+  width: 44px;
+  height: 44px;
   border-radius: 10px;
   object-fit: cover;
   flex-shrink: 0;
@@ -2153,12 +2991,12 @@ const CSS = `
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
 }
 .emd-task-row1 {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   min-width: 0;
   flex-wrap: wrap;
 }
@@ -2169,7 +3007,7 @@ const CSS = `
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 420px;
+  max-width: 400px;
 }
 .emd-task-sub {
   font-size: 11.5px;
@@ -2193,7 +3031,7 @@ const CSS = `
 .emd-badge-quality {
   background: color-mix(in srgb, var(--color-primary, #10b981) 12%, transparent);
   color: var(--color-primary, #10b981);
-  border-color: color-mix(in srgb, var(--color-primary, #10b981) 25%, transparent);
+  border-color: color-mix(in srgb, var(--color-primary, #10b981) 24%, transparent);
 }
 .emd-badge-source {
   background: rgba(59, 130, 246, 0.12);
@@ -2214,17 +3052,27 @@ const CSS = `
   background: rgba(16, 185, 129, 0.14);
   color: #10b981;
 }
-.emd-badge-state-downloading, .emd-badge-state-launching, .emd-badge-state-tagging {
-  background: rgba(245, 158, 11, 0.14);
-  color: #f59e0b;
+.emd-badge-state-downloading,
+.emd-badge-state-launching,
+.emd-badge-state-tagging {
+  background: color-mix(in srgb, var(--color-primary, #10b981) 15%, transparent);
+  color: var(--color-primary, #10b981);
+}
+.emd-badge-state-paused {
+  background: rgba(245, 158, 11, 0.15);
+  color: #d97706;
+}
+.emd-badge-state-queued {
+  background: rgba(59, 130, 246, 0.12);
+  color: #3b82f6;
+}
+.emd-badge-state-canceled {
+  background: rgba(128, 128, 128, 0.14);
+  color: var(--color-text-secondary, #888);
 }
 .emd-badge-state-failed {
   background: rgba(239, 68, 68, 0.14);
   color: #ef4444;
-}
-.emd-badge-state-queued, .emd-badge-state-paused {
-  background: rgba(128, 128, 128, 0.12);
-  color: var(--color-text-secondary, #888);
 }
 
 .emd-progress-track {
@@ -2237,7 +3085,14 @@ const CSS = `
   height: 100%;
   border-radius: 999px;
   background: var(--color-primary, #10b981);
-  transition: width 0.25s ease;
+  transition: width 0.22s ease;
+}
+.emd-progress-bar-paused {
+  background: #d97706;
+  opacity: 0.72;
+}
+.emd-progress-bar-done {
+  background: #10b981;
 }
 .emd-task-actions {
   display: flex;
@@ -2245,27 +3100,11 @@ const CSS = `
   gap: 6px;
   flex-shrink: 0;
 }
-.emd-action-icon {
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  border: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.16));
-  background: transparent;
-  color: var(--color-text-secondary, #888);
+.emd-btn-inner {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-.emd-action-icon:hover {
-  color: var(--color-primary, #10b981);
-  border-color: var(--color-primary, #10b981);
-  background: color-mix(in srgb, var(--color-primary, #10b981) 10%, transparent);
-}
-.emd-action-icon:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
+  gap: 4px;
+  white-space: nowrap;
 }
 
 /* 歌单横向选择器 */
@@ -2281,7 +3120,7 @@ const CSS = `
   gap: 10px;
   padding: 8px 12px;
   border-radius: 12px;
-  min-width: 190px;
+  min-width: 185px;
   max-width: 240px;
   background: var(--bg-info-card, rgba(128, 128, 128, 0.06));
   border: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.14));
@@ -2327,7 +3166,25 @@ const CSS = `
   margin-top: 2px;
 }
 
-/* 批量歌曲表格 */
+/* 批量选歌表格（防误触设计：主区域仅勾选，右侧单曲图标明确隔离） */
+.emd-playlist-meta-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.emd-playlist-meta-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--color-text-main, inherit);
+}
+.emd-playlist-meta-sub {
+  font-size: 12px;
+  color: var(--color-text-secondary, #888);
+  margin-left: 8px;
+  font-weight: 500;
+}
 .emd-song-table {
   display: flex;
   flex-direction: column;
@@ -2342,19 +3199,16 @@ const CSS = `
   gap: 12px;
   padding: 9px 14px;
   border-bottom: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.08));
-  transition: background 0.12s ease;
+  transition: background-color 0.12s ease;
 }
 .emd-song-item:last-child {
   border-bottom: none;
 }
 .emd-song-item:hover {
-  background: color-mix(in srgb, var(--color-primary, #10b981) 6%, transparent);
+  background: color-mix(in srgb, var(--color-primary, #10b981) 5%, transparent);
 }
-.emd-song-item input[type="checkbox"] {
-  accent-color: var(--color-primary, #10b981);
-  width: 15px;
-  height: 15px;
-  cursor: pointer;
+.emd-song-item-selected {
+  background: color-mix(in srgb, var(--color-primary, #10b981) 10%, transparent);
 }
 .emd-song-item-main {
   flex: 1;
@@ -2380,23 +3234,114 @@ const CSS = `
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.emd-row-quick-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--border-subtle, rgba(128, 128, 128, 0.14));
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+.emd-row-quick-dl {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--color-text-secondary, #888);
+  opacity: 0.45;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+.emd-song-item:hover .emd-row-quick-dl,
+.emd-row-quick-dl:focus-visible {
+  opacity: 0.9;
+}
+.emd-row-quick-dl:hover:not(:disabled) {
+  opacity: 1;
+  color: var(--color-primary, #10b981);
+  border-color: color-mix(in srgb, var(--color-primary, #10b981) 45%, transparent);
+  background: color-mix(in srgb, var(--color-primary, #10b981) 10%, transparent);
+}
+.emd-row-quick-dl:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+}
 
-/* 设置卡片 */
-.emd-settings-grid {
+/* 底部常驻吸底操作栏（Tab 0 批量操作栏 / Tab 1 选歌确认操作栏） */
+.emd-bottom-bar {
+  flex-shrink: 0;
+  z-index: 160;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 28px;
+  background: var(--floating-surface-bg, var(--bg-card, var(--bg-main)));
+  -webkit-backdrop-filter: var(--floating-surface-filter, blur(14px));
+  backdrop-filter: var(--floating-surface-filter, blur(14px));
+  border-top: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.18));
+  box-shadow: 0 -4px 18px rgba(0, 0, 0, 0.08);
+  flex-wrap: wrap;
+}
+.emd-bottom-bar-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--color-text-main, inherit);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.emd-bottom-bar-count {
+  font-weight: 700;
+  color: var(--color-primary, #10b981);
+}
+.emd-bottom-bar-sub {
+  font-size: 12px;
+  color: var(--color-text-secondary, #888);
+}
+.emd-bottom-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* 设置分组与卡片 */
+.emd-settings-sections {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 18px;
+}
+.emd-settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.emd-settings-section-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--color-text-secondary, #888);
+  padding-left: 4px;
 }
 .emd-setting-card {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 14px 18px;
-  border-radius: 14px;
+  padding: 13px 16px;
+  border-radius: 13px;
   background: var(--bg-info-card, rgba(128, 128, 128, 0.06));
   border: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.12));
   flex-wrap: wrap;
+}
+.emd-setting-card-disabled {
+  opacity: 0.6;
 }
 .emd-setting-text {
   display: flex;
@@ -2416,13 +3361,127 @@ const CSS = `
   line-height: 1.45;
 }
 .emd-empty-box {
-  padding: 48px 20px;
+  padding: 44px 20px;
   text-align: center;
   border-radius: 14px;
   background: var(--bg-info-card, rgba(128, 128, 128, 0.04));
   border: 1px dashed var(--border-subtle, rgba(128, 128, 128, 0.18));
   color: var(--color-text-secondary, #888);
   font-size: 12.5px;
+}
+
+/* 确认弹窗（主题自适应，防误操作核心屏障） */
+.emd-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: var(--surface-overlay-bg, rgba(0, 0, 0, 0.52));
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
+.emd-modal-card {
+  width: min(480px, 94vw);
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  border-radius: 18px;
+  background: var(--floating-surface-bg, var(--bg-card, var(--bg-main)));
+  -webkit-backdrop-filter: var(--floating-surface-filter, blur(18px));
+  backdrop-filter: var(--floating-surface-filter, blur(18px));
+  border: 1px solid var(--surface-outline, var(--border-subtle, rgba(128, 128, 128, 0.22)));
+  box-shadow: var(--shadow-dialog, 0 20px 50px rgba(0, 0, 0, 0.28));
+  color: var(--color-text-main, inherit);
+  overflow: hidden;
+  user-select: none;
+}
+.emd-modal-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 18px 22px 10px;
+}
+.emd-modal-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.emd-modal-icon-primary {
+  background: color-mix(in srgb, var(--color-primary, #10b981) 14%, transparent);
+  color: var(--color-primary, #10b981);
+}
+.emd-modal-icon-danger {
+  background: rgba(239, 68, 68, 0.14);
+  color: #ef4444;
+}
+.emd-modal-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--color-text-main, inherit);
+  margin: 0;
+}
+.emd-modal-body {
+  padding: 6px 22px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-text-secondary, #888);
+}
+.emd-modal-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--bg-info-card, rgba(128, 128, 128, 0.07));
+  border: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.14));
+}
+.emd-modal-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12.5px;
+}
+.emd-modal-row-label {
+  color: var(--color-text-secondary, #888);
+  flex-shrink: 0;
+}
+.emd-modal-row-val {
+  color: var(--color-text-main, inherit);
+  font-weight: 600;
+  text-align: right;
+  word-break: break-all;
+}
+.emd-modal-row-val-accent {
+  color: var(--color-primary, #10b981);
+  font-weight: 700;
+}
+.emd-modal-preview {
+  font-size: 12px;
+  color: var(--color-text-secondary, #888);
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--control-muted-bg, rgba(128, 128, 128, 0.06));
+}
+.emd-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 22px 18px;
+  border-top: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.12));
+  flex-wrap: wrap;
 }
 `;
 
@@ -2433,223 +3492,349 @@ const CSS = `
 let store = null;
 
 export function activate(ctx) {
-  const { h, defineComponent, defineAsyncComponent, computed, ref, watch, onMounted } = ctx.vue;
+  const {
+    h,
+    defineComponent,
+    defineAsyncComponent,
+    computed,
+    ref,
+    watch,
+    onMounted,
+    onUnmounted,
+    Teleport,
+  } = ctx.vue;
 
-  ctx.css.inject(CSS, { id: 'echo-music-download-v22' });
+  ctx.css.inject(CSS, { id: 'echo-music-download-v23' });
 
   const Button = defineAsyncComponent(ctx.ui.components.Button);
   const Badge = defineAsyncComponent(ctx.ui.components.Badge);
   const Switch = defineAsyncComponent(ctx.ui.components.Switch);
-  const Select = defineAsyncComponent(ctx.ui.components.Select);
   const CustomTabBar = defineAsyncComponent(ctx.ui.components.CustomTabBar);
   const PageScrollContainer = defineAsyncComponent(ctx.ui.components.PageScrollContainer);
   const DetailPageSliverHeader = defineAsyncComponent(ctx.ui.components.DetailPageSliverHeader);
   const PageStickyHeader = defineAsyncComponent(ctx.ui.components.PageStickyHeader);
   const SongSearchInput = defineAsyncComponent(ctx.ui.components.SongSearchInput);
+  const HostCheckbox = ctx.ui.components.Checkbox
+    ? defineAsyncComponent(ctx.ui.components.Checkbox)
+    : null;
+
+  const renderCheckbox = ({ checked, ariaLabel = '选择', onChange }) => {
+    if (HostCheckbox) {
+      return h(HostCheckbox, {
+        modelValue: Boolean(checked),
+        ariaLabel,
+        'onUpdate:modelValue': (val) => onChange(Boolean(val)),
+        onClick: (e) => e.stopPropagation(),
+      });
+    }
+    return h('input', {
+      type: 'checkbox',
+      class: 'emd-native-checkbox',
+      checked: Boolean(checked),
+      'aria-label': ariaLabel,
+      onClick: (e) => e.stopPropagation(),
+      onChange: (e) => onChange(Boolean(e?.target?.checked)),
+    });
+  };
 
   store = createDownloadStore(ctx);
   void store.restore();
+
+  const qualityLabelOf = (q) => {
+    if (q === 'flac') return '无损 FLAC 优先';
+    if (q === '320') return '高品 320k';
+    return '标准 128k';
+  };
 
   // ---- 设置面板组件（同时用于 Tab 2 与宿主插件设置页） ----
   const renderSettingsCards = () => {
     const hasSaveDir = Boolean(store.state.saveDir);
     const opts = store.state.options;
 
-    return h('div', { class: 'emd-settings-grid' }, [
-      // 1. 保存目录
-      h('div', { class: 'emd-setting-card' }, [
-        h('div', { class: 'emd-setting-text' }, [
-          h('div', { class: 'emd-setting-title' }, '本地保存目录（沙箱持久授权）'),
-          h(
-            'div',
-            { class: 'emd-setting-desc' },
-            hasSaveDir
-              ? `当前目录：${store.state.saveDir}（同时支持被「灰歌解灰」与「本地音乐」插件复用）`
-              : '尚未选择保存目录，请先授权一个本地文件夹用于存放下载的音频与 .lrc 歌词',
-          ),
-        ]),
-        h(
-          Button,
-          { variant: 'outline', size: 'sm', onClick: store.chooseSaveDir },
-          { default: () => (hasSaveDir ? '更换目录' : '选择目录') },
-        ),
-      ]),
+    return h('div', { class: 'emd-settings-sections' }, [
+      // 分组 1：保存与命名
+      h('div', { class: 'emd-settings-section' }, [
+        h('div', { class: 'emd-settings-section-title' }, '保存与命名'),
 
-      // 2. 默认音质
-      h('div', { class: 'emd-setting-card' }, [
-        h('div', { class: 'emd-setting-text' }, [
-          h('div', { class: 'emd-setting-title' }, '默认下载音质'),
+        h('div', { class: 'emd-setting-card' }, [
+          h('div', { class: 'emd-setting-text' }, [
+            h('div', { class: 'emd-setting-title' }, '本地保存目录（沙箱持久授权）'),
+            h(
+              'div',
+              { class: 'emd-setting-desc' },
+              hasSaveDir
+                ? `当前目录：${store.state.saveDir}（同时支持被「灰歌解灰」与「本地音乐」插件复用）`
+                : '尚未选择保存目录，请先授权一个本地文件夹用于存放下载的音频与 .lrc 歌词',
+            ),
+          ]),
           h(
-            'div',
-            { class: 'emd-setting-desc' },
-            '优先请求所选档位；若无权限则自动向下回退或联动解灰通道获取高品/无损音源',
+            Button,
+            { variant: hasSaveDir ? 'outline' : 'solid-primary', size: 'sm', onClick: store.chooseSaveDir },
+            { default: () => (hasSaveDir ? '更换目录' : '选择目录') },
           ),
         ]),
-        h(
-          'div',
-          { class: 'emd-pills' },
-          QUALITY_OPTIONS.map((o) =>
+
+        h('div', { class: 'emd-setting-card' }, [
+          h('div', { class: 'emd-setting-text' }, [
+            h('div', { class: 'emd-setting-title' }, '默认下载音质'),
             h(
-              'button',
-              {
-                class: ['emd-pill', store.state.quality === o.value ? 'emd-pill-active' : ''],
-                onClick: () => store.setQuality(o.value),
-              },
-              o.label,
+              'div',
+              { class: 'emd-setting-desc' },
+              '优先请求所选档位；若无权限则自动向下回退或联动解灰通道获取高品/无损音源',
+            ),
+          ]),
+          h(
+            'div',
+            { class: 'emd-seg-tabs', role: 'radiogroup', 'aria-label': '默认下载音质' },
+            QUALITY_OPTIONS.map((o) =>
+              h(
+                'button',
+                {
+                  type: 'button',
+                  class: [
+                    'emd-seg-tab',
+                    store.state.quality === o.value ? 'emd-seg-tab-active' : '',
+                  ],
+                  onClick: () => store.setQuality(o.value),
+                },
+                o.label,
+              ),
             ),
           ),
-        ),
-      ]),
-
-      // 3. 文件名格式
-      h('div', { class: 'emd-setting-card' }, [
-        h('div', { class: 'emd-setting-text' }, [
-          h('div', { class: 'emd-setting-title' }, '文件名命名规则'),
-          h('div', { class: 'emd-setting-desc' }, '对新加入下载队列的歌曲生效，同名 .lrc 自动保持一致'),
         ]),
-        h(
-          'div',
-          { class: 'emd-pills' },
-          NAME_FORMAT_OPTIONS.map((o) =>
-            h(
-              'button',
-              {
-                class: ['emd-pill', store.state.nameFormat === o.value ? 'emd-pill-active' : ''],
-                onClick: () => store.setNameFormat(o.value),
-              },
-              o.label,
+
+        h('div', { class: 'emd-setting-card' }, [
+          h('div', { class: 'emd-setting-text' }, [
+            h('div', { class: 'emd-setting-title' }, '文件名命名规则'),
+            h('div', { class: 'emd-setting-desc' }, '对新加入下载队列的歌曲生效，同名 .lrc 自动保持一致'),
+          ]),
+          h(
+            'div',
+            { class: 'emd-seg-tabs', role: 'radiogroup', 'aria-label': '文件名命名规则' },
+            NAME_FORMAT_OPTIONS.map((o) =>
+              h(
+                'button',
+                {
+                  type: 'button',
+                  class: [
+                    'emd-seg-tab',
+                    store.state.nameFormat === o.value ? 'emd-seg-tab-active' : '',
+                  ],
+                  onClick: () => store.setNameFormat(o.value),
+                },
+                o.label,
+              ),
             ),
           ),
+        ]),
+
+        h('div', { class: 'emd-setting-card' }, [
+          h('div', { class: 'emd-setting-text' }, [
+            h('div', { class: 'emd-setting-title' }, '按歌单名创建子目录'),
+            h(
+              'div',
+              { class: 'emd-setting-desc' },
+              '开启后批量下载歌单时自动归档至「保存目录/歌单名称/文件名」',
+            ),
+          ]),
+          h(Switch, {
+            modelValue: opts.playlistSubfolder,
+            'onUpdate:modelValue': (v) => store.saveOptions({ playlistSubfolder: Boolean(v) }),
+          }),
+        ]),
+
+        h('div', { class: 'emd-setting-card' }, [
+          h('div', { class: 'emd-setting-text' }, [
+            h('div', { class: 'emd-setting-title' }, '自动跳过本地已下载歌曲'),
+            h(
+              'div',
+              { class: 'emd-setting-desc' },
+              '入队前自动对比已完成记录及保存目录磁盘文件，避免重复下载',
+            ),
+          ]),
+          h(Switch, {
+            modelValue: opts.skipExisting,
+            'onUpdate:modelValue': (v) => store.saveOptions({ skipExisting: Boolean(v) }),
+          }),
+        ]),
+      ]),
+
+      // 分组 2：元数据与歌词内嵌
+      h('div', { class: 'emd-settings-section' }, [
+        h('div', { class: 'emd-settings-section-title' }, '元数据与歌词内嵌'),
+
+        h('div', { class: 'emd-setting-card' }, [
+          h('div', { class: 'emd-setting-text' }, [
+            h('div', { class: 'emd-setting-title' }, '自动内嵌歌曲元数据（ID3v2.3 / FLAC）'),
+            h(
+              'div',
+              { class: 'emd-setting-desc' },
+              '下载完成后使用纯 JS 引擎将歌名、歌手、专辑写入 MP3 (ID3v2.3) 或 FLAC (Vorbis Comment) 文件头',
+            ),
+          ]),
+          h(Switch, {
+            modelValue: opts.embedTags,
+            'onUpdate:modelValue': (v) => store.saveOptions({ embedTags: Boolean(v) }),
+          }),
+        ]),
+
+        h(
+          'div',
+          { class: ['emd-setting-card', !opts.embedTags ? 'emd-setting-card-disabled' : ''] },
+          [
+            h('div', { class: 'emd-setting-text' }, [
+              h('div', { class: 'emd-setting-title' }, '内嵌 480px 高清专辑封面'),
+              h(
+                'div',
+                { class: 'emd-setting-desc' },
+                '随音频标签同步写入 APIC / FLAC Picture 封面块，无缝兼容桌面与本地音乐播放器',
+              ),
+            ]),
+            h(Switch, {
+              modelValue: opts.embedCover,
+              disabled: !opts.embedTags,
+              'onUpdate:modelValue': (v) => store.saveOptions({ embedCover: Boolean(v) }),
+            }),
+          ],
         ),
-      ]),
 
-      // 4. 内嵌 ID3v2.3 / FLAC 标签与封面
-      h('div', { class: 'emd-setting-card' }, [
-        h('div', { class: 'emd-setting-text' }, [
-          h('div', { class: 'emd-setting-title' }, '自动内嵌歌曲元数据与高清封面（ID3v2.3 / FLAC）'),
-          h(
-            'div',
-            { class: 'emd-setting-desc' },
-            '下载完成后使用纯 JS 引擎将歌名、歌手、专辑、歌词与 480px 封面直接写入 MP3 (ID3v2.3) 或 FLAC (Vorbis + Picture) 文件头，无缝兼容本地音乐插件',
-          ),
-        ]),
-        h(Switch, {
-          modelValue: opts.embedTags,
-          'onUpdate:modelValue': (v) => store.saveOptions({ embedTags: Boolean(v) }),
-        }),
-      ]),
+        h(
+          'div',
+          { class: ['emd-setting-card', !opts.embedTags ? 'emd-setting-card-disabled' : ''] },
+          [
+            h('div', { class: 'emd-setting-text' }, [
+              h('div', { class: 'emd-setting-title' }, '内嵌歌词至音频标签'),
+              h(
+                'div',
+                { class: 'emd-setting-desc' },
+                '将同步获取的歌词写入 MP3 USLT 或 FLAC LYRICS 标签字段',
+              ),
+            ]),
+            h(Switch, {
+              modelValue: opts.embedLyrics,
+              disabled: !opts.embedTags,
+              'onUpdate:modelValue': (v) => store.saveOptions({ embedLyrics: Boolean(v) }),
+            }),
+          ],
+        ),
 
-      // 5. 导出同名 .lrc 歌词文件
-      h('div', { class: 'emd-setting-card' }, [
-        h('div', { class: 'emd-setting-text' }, [
-          h('div', { class: 'emd-setting-title' }, '同步导出同名 .lrc 歌词文件'),
-          h(
-            'div',
-            { class: 'emd-setting-desc' },
-            '在音频同级目录生成同名 .lrc 歌词文件，优先合并原文与中文翻译双语时间轴',
-          ),
-        ]),
-        h('div', { class: 'emd-pills' }, [
-          h(
-            'button',
-            {
-              class: ['emd-pill', opts.preferBilingualLrc ? 'emd-pill-active' : ''],
-              onClick: () =>
-                store.saveOptions({ preferBilingualLrc: !opts.preferBilingualLrc }),
-            },
-            opts.preferBilingualLrc ? '双语翻译合并：已开启' : '仅原词',
-          ),
+        h('div', { class: 'emd-setting-card' }, [
+          h('div', { class: 'emd-setting-text' }, [
+            h('div', { class: 'emd-setting-title' }, '同步导出同名 .lrc 歌词文件'),
+            h(
+              'div',
+              { class: 'emd-setting-desc' },
+              '在音频同级目录生成同名 .lrc 歌词文件，便于外置播放器与本地曲库识别',
+            ),
+          ]),
           h(Switch, {
             modelValue: opts.writeLrc,
             'onUpdate:modelValue': (v) => store.saveOptions({ writeLrc: Boolean(v) }),
           }),
         ]),
-      ]),
 
-      // 6. 灰歌解灰联动下载
-      h('div', { class: 'emd-setting-card' }, [
-        h('div', { class: 'emd-setting-text' }, [
-          h('div', { class: 'emd-setting-title' }, '灰歌 / VIP 受限歌曲自动解灰下载'),
-          h(
-            'div',
-            { class: 'emd-setting-desc' },
-            '当酷狗官方接口因无版权或 VIP 限制无法返回下载地址时，自动调用「灰歌解灰 (echo-music-unblock)」或内置聚合通道下载可用音源',
-          ),
-        ]),
-        h(Switch, {
-          modelValue: opts.useUnblockFallback,
-          'onUpdate:modelValue': (v) => store.saveOptions({ useUnblockFallback: Boolean(v) }),
-        }),
-      ]),
-
-      // 7. 歌单子目录与增量同步
-      h('div', { class: 'emd-setting-card' }, [
-        h('div', { class: 'emd-setting-text' }, [
-          h('div', { class: 'emd-setting-title' }, '歌单批量下载：按歌单名创建子目录'),
-          h(
-            'div',
-            { class: 'emd-setting-desc' },
-            '开启后批量下载歌单时将自动归档至「保存目录/歌单名称/歌手 - 歌名.mp3」',
-          ),
-        ]),
-        h(Switch, {
-          modelValue: opts.playlistSubfolder,
-          'onUpdate:modelValue': (v) => store.saveOptions({ playlistSubfolder: Boolean(v) }),
-        }),
-      ]),
-
-      h('div', { class: 'emd-setting-card' }, [
-        h('div', { class: 'emd-setting-text' }, [
-          h('div', { class: 'emd-setting-title' }, '增量同步：自动跳过已下载歌曲'),
-          h(
-            'div',
-            { class: 'emd-setting-desc' },
-            '入队前自动对比已完成记录及保存目录磁盘文件，避免整张歌单同步时重复下载',
-          ),
-        ]),
-        h(Switch, {
-          modelValue: opts.skipExisting,
-          'onUpdate:modelValue': (v) => store.saveOptions({ skipExisting: Boolean(v) }),
-        }),
-      ]),
-
-      // 8. 并发数
-      h('div', { class: 'emd-setting-card' }, [
-        h('div', { class: 'emd-setting-text' }, [
-          h('div', { class: 'emd-setting-title' }, '最大同时下载任务数'),
-          h('div', { class: 'emd-setting-desc' }, '建议设置为 2 ~ 3，兼顾下载速率与标签写入稳定性'),
-        ]),
         h(
           'div',
-          { class: 'emd-pills' },
-          [1, 2, 3, 4].map((n) =>
+          {
+            class: [
+              'emd-setting-card',
+              !opts.writeLrc && !opts.embedLyrics ? 'emd-setting-card-disabled' : '',
+            ],
+          },
+          [
+            h('div', { class: 'emd-setting-text' }, [
+              h('div', { class: 'emd-setting-title' }, '优先合并双语翻译歌词'),
+              h(
+                'div',
+                { class: 'emd-setting-desc' },
+                '外语歌曲优先合并原文与中文翻译时间轴，提升歌词阅读体验',
+              ),
+            ]),
+            h(Switch, {
+              modelValue: opts.preferBilingualLrc,
+              disabled: !opts.writeLrc && !opts.embedLyrics,
+              'onUpdate:modelValue': (v) => store.saveOptions({ preferBilingualLrc: Boolean(v) }),
+            }),
+          ],
+        ),
+      ]),
+
+      // 分组 3：灰歌解灰联动
+      h('div', { class: 'emd-settings-section' }, [
+        h('div', { class: 'emd-settings-section-title' }, '灰歌解灰联动'),
+
+        h('div', { class: 'emd-setting-card' }, [
+          h('div', { class: 'emd-setting-text' }, [
+            h('div', { class: 'emd-setting-title' }, '灰歌 / VIP 受限歌曲自动解灰下载'),
             h(
-              'button',
-              {
-                class: ['emd-pill', store.state.maxConcurrent === n ? 'emd-pill-active' : ''],
-                onClick: () => store.setMaxConcurrent(n),
-              },
-              `${n} 线程`,
+              'div',
+              { class: 'emd-setting-desc' },
+              '当酷狗官方接口因无版权或 VIP 限制无法返回下载地址时，自动调用「灰歌解灰 (echo-music-unblock)」或内置聚合通道下载可用音源',
+            ),
+          ]),
+          h(Switch, {
+            modelValue: opts.useUnblockFallback,
+            'onUpdate:modelValue': (v) => store.saveOptions({ useUnblockFallback: Boolean(v) }),
+          }),
+        ]),
+      ]),
+
+      // 分组 4：并发与队列控制
+      h('div', { class: 'emd-settings-section' }, [
+        h('div', { class: 'emd-settings-section-title' }, '并发与队列控制'),
+
+        h('div', { class: 'emd-setting-card' }, [
+          h('div', { class: 'emd-setting-text' }, [
+            h('div', { class: 'emd-setting-title' }, '最大同时下载任务数'),
+            h('div', { class: 'emd-setting-desc' }, '建议设置为 2 ~ 3，兼顾下载速率与标签写入稳定性'),
+          ]),
+          h(
+            'div',
+            { class: 'emd-seg-tabs', role: 'radiogroup', 'aria-label': '最大同时下载任务数' },
+            [1, 2, 3, 4].map((n) =>
+              h(
+                'button',
+                {
+                  type: 'button',
+                  class: [
+                    'emd-seg-tab',
+                    store.state.maxConcurrent === n ? 'emd-seg-tab-active' : '',
+                  ],
+                  onClick: () => store.setMaxConcurrent(n),
+                },
+                `${n} 线程`,
+              ),
             ),
           ),
-        ),
+        ]),
       ]),
     ]);
   };
 
-  // ---- 主页面组件（EchoMusic v2.3.x 原生 SliverHeader + StickyHeader + CustomTabBar 架构） ----
+  // ---- 通用确认弹窗包裹器（支持 Teleport 到 body 与 ESC 关闭） ----
+  const renderModalPortal = (modalVNode) => {
+    if (!modalVNode) return null;
+    if (Teleport && typeof document !== 'undefined' && document.body) {
+      return h(Teleport, { to: 'body' }, [modalVNode]);
+    }
+    return modalVNode;
+  };
+
+  // ---- 主页面组件（EchoMusic v2.3.x 原生 PageScrollContainer + SliverHeader + StickyHeader + CustomTabBar 架构） ----
   const DownloadPage = defineComponent({
-    name: 'EchoMusicDownloadPageV22',
+    name: 'EchoMusicDownloadPageV23',
     setup() {
       const headerRef = ref(null);
-      const headerHeight = computed(() => headerRef.value?.currentHeight ?? 176);
+      const headerHeight = computed(() => headerRef.value?.currentHeight ?? 168);
       const activeTabIndex = ref(0);
 
-      // 任务列表过滤状态
-      const taskFilter = ref('all'); // 'all' | 'active' | 'done' | 'failed'
+      // Tab 0：任务队列过滤与批量管理状态
+      const taskFilter = ref('all'); // 'all' | 'active' | 'paused' | 'done' | 'ended'
       const taskSearch = ref('');
+      const batchManageMode = ref(false);
+      const selectedTaskIds = ref(new Set());
 
-      // 歌单/队列批量下载状态
+      // Tab 1：歌单 / 播放队列安全选歌状态
       const batchSourceMode = ref('user-playlists'); // 'user-playlists' | 'playback-queues'
       const userPlaylists = ref([]);
       const loadingPlaylists = ref(false);
@@ -2661,48 +3846,284 @@ export function activate(ctx) {
       const renderLimit = ref(PAGE_RENDER_STEP);
       const selectedHashes = ref(new Set());
 
+      // 防误操作确认弹窗状态
+      const downloadConfirmState = ref(null);
+      const cancelConfirmState = ref(null);
+
       const currentTrack = computed(() => ctx.player?.currentTrack?.value ?? null);
+      const currentTrackMeta = computed(() =>
+        currentTrack.value ? buildSongMeta(currentTrack.value) : null,
+      );
       const playbackQueues = computed(() =>
         (ctx.playlist?.queues?.value ?? []).filter((q) => q && q.type !== 'search'),
       );
 
-      // 任务统计
+      // ESC 快捷键关闭弹窗
+      const handleGlobalKeydown = (e) => {
+        if (e.key !== 'Escape') return;
+        if (downloadConfirmState.value) {
+          downloadConfirmState.value = null;
+        } else if (cancelConfirmState.value) {
+          cancelConfirmState.value = null;
+        }
+      };
+
+      onMounted(() => {
+        if (typeof window !== 'undefined') {
+          window.addEventListener('keydown', handleGlobalKeydown);
+        }
+        void store.refreshExistingFiles();
+        void loadUserPlaylists();
+      });
+
+      onUnmounted(() => {
+        if (typeof window !== 'undefined') {
+          window.removeEventListener('keydown', handleGlobalKeydown);
+        }
+      });
+
+      // 自动清理已移除任务的勾选残留
+      watch(
+        () => store.state.tasks.map((t) => t.id).join(','),
+        () => {
+          if (selectedTaskIds.value.size === 0) return;
+          const existingIds = new Set(store.state.tasks.map((t) => t.id));
+          let changed = false;
+          const next = new Set();
+          for (const id of selectedTaskIds.value) {
+            if (existingIds.has(id)) next.add(id);
+            else changed = true;
+          }
+          if (changed) selectedTaskIds.value = next;
+        },
+      );
+
+      // 任务统计与实时聚合速度
       const taskCounts = computed(() => {
         const all = store.state.tasks.length;
-        let active = 0;
+        let inProgress = 0; // queued + launching + downloading + tagging
+        let downloading = 0; // launching + downloading + tagging
+        let queued = 0;
+        let pausable = 0; // queued + launching + downloading
+        let paused = 0;
         let done = 0;
+        let canceled = 0;
         let failed = 0;
+        let totalSpeedBytes = 0;
+
         for (const t of store.state.tasks) {
-          if (['queued', 'launching', 'downloading', 'tagging', 'paused'].includes(t.state)) {
-            active += 1;
+          if (t.state === 'downloading' || t.state === 'launching' || t.state === 'tagging') {
+            inProgress += 1;
+            downloading += 1;
+            if (t.state !== 'tagging') pausable += 1;
+            if (t.state === 'downloading' && t.bytesPerSecond > 0) {
+              totalSpeedBytes += Number(t.bytesPerSecond) || 0;
+            }
+          } else if (t.state === 'queued') {
+            inProgress += 1;
+            queued += 1;
+            pausable += 1;
+          } else if (t.state === 'paused') {
+            paused += 1;
           } else if (t.state === 'done') {
             done += 1;
+          } else if (t.state === 'canceled') {
+            canceled += 1;
           } else if (t.state === 'failed') {
             failed += 1;
           }
         }
-        return { all, active, done, failed };
+        return {
+          all,
+          inProgress,
+          downloading,
+          queued,
+          pausable,
+          paused,
+          cancellable: pausable + paused,
+          done,
+          canceled,
+          failed,
+          ended: canceled + failed,
+          totalSpeedBytes,
+        };
       });
+
+      const taskSortRank = (state) => {
+        if (state === 'downloading' || state === 'tagging' || state === 'launching') return 0;
+        if (state === 'paused') return 1;
+        if (state === 'queued') return 2;
+        if (state === 'failed') return 3;
+        if (state === 'canceled') return 4;
+        return 5; // done
+      };
 
       const filteredTasks = computed(() => {
         const q = taskSearch.value.trim().toLowerCase();
-        return store.state.tasks.filter((t) => {
+        const list = store.state.tasks.filter((t) => {
           if (
             taskFilter.value === 'active' &&
-            !['queued', 'launching', 'downloading', 'tagging', 'paused'].includes(t.state)
+            !['queued', 'launching', 'downloading', 'tagging'].includes(t.state)
           ) {
             return false;
           }
+          if (taskFilter.value === 'paused' && t.state !== 'paused') return false;
           if (taskFilter.value === 'done' && t.state !== 'done') return false;
-          if (taskFilter.value === 'failed' && t.state !== 'failed') return false;
+          if (taskFilter.value === 'ended' && !['canceled', 'failed'].includes(t.state)) {
+            return false;
+          }
           if (q && !`${t.name} ${t.album || ''} ${t.subfolder || ''}`.toLowerCase().includes(q)) {
             return false;
           }
           return true;
         });
+
+        // 明确排序：进行中置顶 -> 已暂停紧随其后 -> 排队中按 FIFO 顺序 -> 已结束按最新时间倒序
+        return [...list].sort((a, b) => {
+          const ra = taskSortRank(a.state);
+          const rb = taskSortRank(b.state);
+          if (ra !== rb) return ra - rb;
+          if (ra <= 2) {
+            return (a.order ?? a.createdAt ?? 0) - (b.order ?? b.createdAt ?? 0);
+          }
+          return (b.updatedAt ?? 0) - (a.updatedAt ?? 0);
+        });
       });
 
-      // 加载用户酷狗歌单（我喜欢 / 自建 / 收藏）
+      // Tab 0 批量勾选统计
+      const selectedTaskStats = computed(() => {
+        const ids = selectedTaskIds.value;
+        let total = 0;
+        let pausable = 0;
+        let paused = 0;
+        let cancellable = 0;
+        let retryable = 0;
+        let running = 0;
+        let queued = 0;
+
+        for (const t of store.state.tasks) {
+          if (!ids.has(t.id)) continue;
+          total += 1;
+          if (['queued', 'launching', 'downloading'].includes(t.state)) {
+            pausable += 1;
+            cancellable += 1;
+            if (t.state === 'queued') queued += 1;
+            else running += 1;
+          } else if (t.state === 'tagging') {
+            running += 1;
+          } else if (t.state === 'paused') {
+            paused += 1;
+            cancellable += 1;
+          } else if (['done', 'failed', 'canceled'].includes(t.state)) {
+            retryable += 1;
+          }
+        }
+        return { total, pausable, paused, cancellable, retryable, running, queued };
+      });
+
+      const toggleTaskSelect = (taskId) => {
+        const next = new Set(selectedTaskIds.value);
+        if (next.has(taskId)) next.delete(taskId);
+        else next.add(taskId);
+        selectedTaskIds.value = next;
+      };
+
+      const selectAllCurrentTasks = () => {
+        const next = new Set(selectedTaskIds.value);
+        for (const t of filteredTasks.value) next.add(t.id);
+        selectedTaskIds.value = next;
+      };
+
+      const invertCurrentTasks = () => {
+        const next = new Set(selectedTaskIds.value);
+        for (const t of filteredTasks.value) {
+          if (next.has(t.id)) next.delete(t.id);
+          else next.add(t.id);
+        }
+        selectedTaskIds.value = next;
+      };
+
+      const exitBatchManageMode = () => {
+        batchManageMode.value = false;
+        selectedTaskIds.value = new Set();
+      };
+
+      // 安全取消确认弹窗触发器
+      const requestCancelAllActive = () => {
+        const counts = taskCounts.value;
+        if (counts.cancellable === 0) {
+          ctx.toast.info('当前没有可取消的任务');
+          return;
+        }
+        cancelConfirmState.value = {
+          mode: 'cancel-all',
+          title: '确认取消全部活跃任务',
+          total: counts.cancellable,
+          running: counts.downloading,
+          queued: counts.queued,
+          paused: counts.paused,
+          confirmLabel: `确认全部取消 (${counts.cancellable} 个)`,
+          onConfirm: async () => {
+            cancelConfirmState.value = null;
+            await store.cancelAllActive();
+          },
+        };
+      };
+
+      const requestBatchCancel = () => {
+        const stats = selectedTaskStats.value;
+        if (stats.cancellable === 0) {
+          ctx.toast.info('所选任务中没有进行中或已暂停的项目');
+          return;
+        }
+        const ids = new Set(selectedTaskIds.value);
+        if (stats.cancellable >= 2) {
+          cancelConfirmState.value = {
+            mode: 'batch-cancel',
+            title: '确认批量取消选中任务',
+            total: stats.cancellable,
+            running: stats.running,
+            queued: stats.queued,
+            paused: stats.paused,
+            confirmLabel: `确认批量取消 (${stats.cancellable} 个)`,
+            onConfirm: async () => {
+              cancelConfirmState.value = null;
+              await store.batchCancel(ids);
+            },
+          };
+          return;
+        }
+        void store.batchCancel(ids);
+      };
+
+      const requestBatchRemove = () => {
+        const stats = selectedTaskStats.value;
+        if (stats.total === 0) return;
+        const ids = new Set(selectedTaskIds.value);
+        if (stats.cancellable >= 2) {
+          cancelConfirmState.value = {
+            mode: 'batch-remove',
+            title: '确认终止并移除选中任务',
+            total: stats.total,
+            running: stats.running,
+            queued: stats.queued,
+            paused: stats.paused,
+            extraNote: `其中包含 ${stats.cancellable} 个未完成任务，将先停止下载再从列表移除。`,
+            confirmLabel: `确认移除 (${stats.total} 项)`,
+            onConfirm: async () => {
+              cancelConfirmState.value = null;
+              await store.batchRemove(ids);
+              selectedTaskIds.value = new Set();
+            },
+          };
+          return;
+        }
+        void store.batchRemove(ids).then(() => {
+          selectedTaskIds.value = new Set();
+        });
+      };
+
+      // ---- Tab 1：歌单 / 播放队列数据加载 ----
       const loadUserPlaylists = async () => {
         if (!ctx?.kugou?.playlist?.getUserPlaylists) {
           batchSourceMode.value = 'playback-queues';
@@ -2751,7 +4172,6 @@ export function activate(ctx) {
         }
       };
 
-      // 分页拉取歌单全量歌曲（突破旧版 100 首上限）
       let loadSongsSeq = 0;
       const selectUserPlaylist = async (pl) => {
         if (!pl) return;
@@ -2853,13 +4273,15 @@ export function activate(ctx) {
           void selectPlaybackQueue(playbackQueues.value[0]);
         } else {
           batchSongs.value = [];
+          selectedHashes.value = new Set();
         }
       });
 
-      onMounted(() => {
-        void store.refreshExistingFiles();
-        void loadUserPlaylists();
-      });
+      const currentSubfolder = computed(() =>
+        store.state.options.playlistSubfolder && selectedPlaylistTitle.value
+          ? sanitizePathSegment(selectedPlaylistTitle.value, '歌单')
+          : '',
+      );
 
       const filteredBatchSongs = computed(() => {
         const q = batchSearch.value.trim().toLowerCase();
@@ -2874,20 +4296,79 @@ export function activate(ctx) {
         filteredBatchSongs.value.slice(0, renderLimit.value),
       );
 
+      const localCountInFiltered = computed(() => {
+        const sub = currentSubfolder.value;
+        let count = 0;
+        for (const s of filteredBatchSongs.value) {
+          if (store.isSongAlreadyDownloaded(s, sub)) count += 1;
+        }
+        return count;
+      });
+
+      // Tab 1 精确勾选统计（与 enqueueSongs 逻辑 100% 一致）
+      const selectionSummary = computed(() => {
+        const sub = currentSubfolder.value;
+        const skipExisting = Boolean(store.state.options.skipExisting);
+        const picked = [];
+        const toDownload = [];
+        const seen = new Set();
+        let existingCount = 0;
+        let inQueueCount = 0;
+
+        for (const song of batchSongs.value) {
+          const meta = buildSongMeta(song);
+          if (!meta.hash) continue;
+          const hashKey = meta.hash.toLowerCase();
+          if (!selectedHashes.value.has(meta.hash) || seen.has(hashKey)) continue;
+          seen.add(hashKey);
+          picked.push(song);
+
+          if (store.isSongInActiveQueue(song)) {
+            inQueueCount += 1;
+            continue;
+          }
+          if (store.isSongAlreadyDownloaded(song, sub)) {
+            existingCount += 1;
+            if (skipExisting) continue;
+          }
+          toDownload.push(song);
+        }
+
+        return {
+          picked,
+          toDownload,
+          selectedCount: picked.length,
+          existingCount,
+          skippedExistingCount: skipExisting ? existingCount : 0,
+          inQueueCount,
+          actualCount: toDownload.length,
+        };
+      });
+
       const toggleSongCheck = (hash) => {
+        if (!hash) return;
         const next = new Set(selectedHashes.value);
         if (next.has(hash)) next.delete(hash);
         else next.add(hash);
         selectedHashes.value = next;
       };
 
-      const selectAllFiltered = () => {
+      const selectVisibleBatchSongs = () => {
+        const next = new Set(selectedHashes.value);
+        for (const s of visibleBatchSongs.value) {
+          const hVal = buildSongMeta(s).hash;
+          if (hVal) next.add(hVal);
+        }
+        selectedHashes.value = next;
+      };
+
+      const selectAllPlaylistSongs = () => {
         selectedHashes.value = new Set(
           filteredBatchSongs.value.map((s) => buildSongMeta(s).hash).filter(Boolean),
         );
       };
 
-      const clearSelection = () => {
+      const clearSongSelection = () => {
         selectedHashes.value = new Set();
       };
 
@@ -2900,228 +4381,395 @@ export function activate(ctx) {
         void store.enqueueSongs([track]);
       };
 
-      const downloadSelectedBatch = () => {
-        const picked = batchSongs.value.filter((s) =>
-          selectedHashes.value.has(buildSongMeta(s).hash),
-        );
-        if (picked.length === 0) {
+      // 防误操作批量下载入口：>= 3 首或选中整张歌单时强制弹出确认弹窗
+      const prepareBatchDownload = () => {
+        if (!store.state.saveDir) {
+          ctx.toast.info('请先选择歌曲保存目录');
+          return;
+        }
+        const summary = selectionSummary.value;
+        if (summary.selectedCount === 0) {
           ctx.toast.info('请先勾选要下载的歌曲');
           return;
         }
-        void store.enqueueSongs(picked, { playlistName: selectedPlaylistTitle.value });
-      };
-
-      const downloadAllInPlaylist = () => {
-        if (filteredBatchSongs.value.length === 0) {
-          ctx.toast.info('当前列表没有可下载的歌曲');
+        if (summary.actualCount === 0) {
+          if (summary.skippedExistingCount > 0) {
+            ctx.toast.info(`已勾选的 ${summary.skippedExistingCount} 首歌曲均已存在于本地`);
+          } else if (summary.inQueueCount > 0) {
+            ctx.toast.info(`已勾选的 ${summary.inQueueCount} 首歌曲均已在下载队列中`);
+          }
           return;
         }
-        void store.enqueueSongs(filteredBatchSongs.value, {
+
+        const isFullPlaylist =
+          filteredBatchSongs.value.length >= 2 &&
+          summary.selectedCount >= filteredBatchSongs.value.length;
+        const needConfirm =
+          summary.actualCount >= 3 || summary.selectedCount >= 3 || isFullPlaylist;
+
+        if (!needConfirm) {
+          void store
+            .enqueueSongs(summary.picked, {
+              playlistName: selectedPlaylistTitle.value,
+              startPaused: false,
+            })
+            .then((res) => {
+              if (res?.added > 0) {
+                selectedHashes.value = new Set();
+              }
+            });
+          return;
+        }
+
+        const opts = store.state.options;
+        const tagParts = [];
+        if (opts.embedTags) {
+          tagParts.push(
+            opts.embedCover
+              ? '内嵌 ID3v2/FLAC 标签与封面'
+              : '内嵌 ID3v2/FLAC 文字标签',
+          );
+        } else {
+          tagParts.push('仅下载音频文件');
+        }
+        if (opts.writeLrc) {
+          tagParts.push(opts.preferBilingualLrc ? '导出双语 .lrc' : '导出 .lrc');
+        }
+
+        const previewNames = summary.toDownload
+          .slice(0, 4)
+          .map((s) => {
+            const m = buildSongMeta(s);
+            return m.artist ? `${m.artist} - ${m.title}` : m.title;
+          })
+          .filter(Boolean);
+
+        downloadConfirmState.value = {
+          picked: summary.picked,
           playlistName: selectedPlaylistTitle.value,
-        });
+          subfolder: currentSubfolder.value,
+          actualCount: summary.actualCount,
+          skippedExistingCount: summary.skippedExistingCount,
+          inQueueCount: summary.inQueueCount,
+          qualityLabel: qualityLabelOf(store.state.quality),
+          tagSummary: tagParts.join(' · '),
+          previewNames,
+        };
       };
 
-      // 渲染单个任务卡片
+      const executeConfirmedDownload = async (startPaused) => {
+        const payload = downloadConfirmState.value;
+        downloadConfirmState.value = null;
+        if (!payload) return;
+        const res = await store.enqueueSongs(payload.picked, {
+          playlistName: payload.playlistName,
+          startPaused,
+        });
+        if (res?.added > 0) {
+          selectedHashes.value = new Set();
+          activeTabIndex.value = 0;
+        }
+      };
+
+      // ---- 渲染单个任务卡片（清晰的单任务暂停/继续/取消/重试/移除 + 复选框） ----
       const renderTaskCard = (task) => {
         const label = TASK_STATE_LABEL[task.state] || task.state;
-        const isActive = ['downloading', 'launching', 'tagging'].includes(task.state);
-        const isFinished = task.state === 'done' || task.state === 'failed';
+        const isRunning = ['downloading', 'launching', 'tagging'].includes(task.state);
+        const isQueued = task.state === 'queued';
+        const isPaused = task.state === 'paused';
+        const isEnded = ['done', 'failed', 'canceled'].includes(task.state);
+        const isChecked = selectedTaskIds.value.has(task.id);
         const pct =
           task.percent != null && !Number.isNaN(Number(task.percent))
             ? Number(task.percent)
             : task.state === 'done'
               ? 100
               : 0;
+        const showProgress = isRunning || (isPaused && pct > 0) || task.state === 'done';
 
-        return h('div', { class: 'emd-task-card', key: task.id }, [
-          task.coverUrl
-            ? h('img', { class: 'emd-task-cover', src: task.coverUrl, alt: '' })
-            : h('div', { class: 'emd-task-cover' }, [iconSvg(h, ICONS.music, { size: 20 })]),
-
-          h('div', { class: 'emd-task-main' }, [
-            h('div', { class: 'emd-task-row1' }, [
-              h('span', { class: 'emd-task-title', title: task.name }, task.name),
-              h(
-                'span',
-                { class: 'emd-badge emd-badge-quality' },
-                task.quality === 'flac'
-                  ? 'FLAC 无损'
-                  : task.quality === '320'
-                    ? '320k 高品'
-                    : '128k 标准',
-              ),
-              task.sourceLabel && task.sourceLabel !== '酷狗官方'
-                ? h('span', { class: 'emd-badge emd-badge-source' }, task.sourceLabel)
-                : null,
-              task.subfolder
-                ? h('span', { class: 'emd-badge emd-badge-folder' }, `📁 ${task.subfolder}`)
-                : null,
-              task.tagStatus
-                ? h('span', { class: 'emd-badge emd-badge-tag' }, task.tagStatus)
-                : null,
-              task.lrcStatus
-                ? h('span', { class: 'emd-badge emd-badge-tag' }, task.lrcStatus)
-                : null,
-              h('span', { class: `emd-badge emd-badge-state-${task.state}` }, label),
+        return h(
+          'div',
+          {
+            class: [
+              'emd-task-card',
+              isChecked ? 'emd-task-card-selected' : '',
+              batchManageMode.value ? 'emd-task-card-clickable' : '',
+            ],
+            key: task.id,
+            onClick: () => {
+              if (batchManageMode.value) toggleTaskSelect(task.id);
+            },
+          },
+          [
+            h('div', { class: 'emd-task-check-wrap' }, [
+              renderCheckbox({
+                checked: isChecked,
+                ariaLabel: `选择任务 ${task.name}`,
+                onChange: () => toggleTaskSelect(task.id),
+              }),
             ]),
 
-            isActive || task.state === 'done'
-              ? h('div', { class: 'emd-progress-track' }, [
-                  h('div', { class: 'emd-progress-bar', style: { width: `${pct}%` } }),
-                ])
-              : null,
+            task.coverUrl
+              ? h('img', { class: 'emd-task-cover', src: task.coverUrl, alt: '' })
+              : h('div', { class: 'emd-task-cover' }, [iconSvg(h, ICONS.music, { size: 20 })]),
 
-            h('div', { class: 'emd-task-sub' }, [
-              isActive
-                ? h(
-                    'span',
-                    { style: { color: 'var(--color-primary, #10b981)', fontWeight: 700 } },
-                    task.state === 'tagging'
-                      ? '正在写入 ID3v2/FLAC 元数据与歌词…'
-                      : `${pct.toFixed(0)}% ${task.speed ? `· ${task.speed}` : ''} ${task.eta ? `· 剩余 ${task.eta}` : ''}`,
-                  )
+            h('div', { class: 'emd-task-main' }, [
+              h('div', { class: 'emd-task-row1' }, [
+                h('span', { class: 'emd-task-title', title: task.name }, task.name),
+                h(
+                  'span',
+                  { class: 'emd-badge emd-badge-quality' },
+                  task.quality === 'flac'
+                    ? 'FLAC 无损'
+                    : task.quality === '320'
+                      ? '320k 高品'
+                      : '128k 标准',
+                ),
+                task.sourceLabel && task.sourceLabel !== '酷狗官方'
+                  ? h('span', { class: 'emd-badge emd-badge-source' }, task.sourceLabel)
+                  : null,
+                task.subfolder
+                  ? h('span', { class: 'emd-badge emd-badge-folder' }, `📁 ${task.subfolder}`)
+                  : null,
+                task.tagStatus
+                  ? h('span', { class: 'emd-badge emd-badge-tag' }, task.tagStatus)
+                  : null,
+                task.lrcStatus
+                  ? h('span', { class: 'emd-badge emd-badge-tag' }, task.lrcStatus)
+                  : null,
+                h('span', { class: `emd-badge emd-badge-state-${task.state}` }, label),
+              ]),
+
+              showProgress
+                ? h('div', { class: 'emd-progress-track' }, [
+                    h('div', {
+                      class: [
+                        'emd-progress-bar',
+                        isPaused ? 'emd-progress-bar-paused' : '',
+                        task.state === 'done' ? 'emd-progress-bar-done' : '',
+                      ],
+                      style: { width: `${pct}%` },
+                    }),
+                  ])
                 : null,
-              task.album ? h('span', null, `专辑：${task.album}`) : null,
-              task.note ? h('span', null, task.note) : null,
-              task.state === 'done' && task.finalPath
-                ? h('span', { title: task.finalPath }, `保存至：${task.fileName || task.finalPath}`)
-                : null,
-              task.state === 'failed' && task.error
-                ? h('span', { style: { color: '#ef4444', fontWeight: 600 } }, task.error)
-                : null,
+
+              h('div', { class: 'emd-task-sub' }, [
+                isRunning
+                  ? h(
+                      'span',
+                      { style: { color: 'var(--color-primary, #10b981)', fontWeight: 700 } },
+                      task.state === 'tagging'
+                        ? '正在写入 ID3v2/FLAC 元数据与歌词…'
+                        : task.state === 'launching'
+                          ? '正在解析可用音源…'
+                          : `${pct.toFixed(0)}%${task.speed ? ` · ${task.speed}` : ''}${task.eta ? ` · 剩余 ${task.eta}` : ''}`,
+                    )
+                  : null,
+                isPaused && pct > 0
+                  ? h('span', { style: { color: '#d97706', fontWeight: 600 } }, `已暂停于 ${pct.toFixed(0)}%`)
+                  : null,
+                task.album ? h('span', null, `专辑：${task.album}`) : null,
+                task.note ? h('span', null, task.note) : null,
+                task.state === 'done' && task.finalPath
+                  ? h('span', { title: task.finalPath }, `保存至：${task.fileName || task.finalPath}`)
+                  : null,
+                task.state === 'failed' && task.error
+                  ? h('span', { style: { color: '#ef4444', fontWeight: 600 } }, task.error)
+                  : null,
+              ]),
             ]),
-          ]),
 
-          h('div', { class: 'emd-task-actions' }, [
-            isActive
-              ? h(
-                  'button',
-                  {
-                    class: 'emd-action-icon',
-                    title: '取消下载',
-                    onClick: () => store.cancelTask(task),
-                  },
-                  [iconSvg(h, ICONS.close, { size: 15 })],
-                )
-              : null,
-            isFinished
-              ? h(
-                  'button',
-                  {
-                    class: 'emd-action-icon',
-                    title: '重新下载',
-                    onClick: () => store.retryTask(task),
-                  },
-                  [iconSvg(h, ICONS.refresh, { size: 15 })],
-                )
-              : null,
-            isFinished || task.state === 'queued'
-              ? h(
-                  'button',
-                  {
-                    class: 'emd-action-icon',
-                    title: '移除记录',
-                    onClick: () => store.removeTask(task),
-                  },
-                  [iconSvg(h, ICONS.trash, { size: 15 })],
-                )
-              : null,
-          ]),
-        ]);
+            h(
+              'div',
+              {
+                class: 'emd-task-actions',
+                onClick: (e) => e.stopPropagation(),
+              },
+              [
+                // 进行中 / 排队中 -> 暂停 + 取消
+                task.state === 'downloading' || task.state === 'launching' || isQueued
+                  ? h(
+                      Button,
+                      {
+                        variant: 'outline',
+                        size: 'xs',
+                        onClick: () => void store.pauseTask(task),
+                      },
+                      {
+                        default: () =>
+                          h('span', { class: 'emd-btn-inner' }, [
+                            iconSvg(h, ICONS.pause, { size: 13 }),
+                            h('span', null, '暂停'),
+                          ]),
+                      },
+                    )
+                  : null,
+
+                // 已暂停 -> 继续 + 取消
+                isPaused
+                  ? h(
+                      Button,
+                      {
+                        variant: 'primary',
+                        size: 'xs',
+                        onClick: () => void store.resumeTask(task),
+                      },
+                      {
+                        default: () =>
+                          h('span', { class: 'emd-btn-inner' }, [
+                            iconSvg(h, ICONS.play, { size: 13 }),
+                            h('span', null, '继续'),
+                          ]),
+                      },
+                    )
+                  : null,
+
+                // 取消按钮（排队中 / 解析中 / 下载中 / 已暂停）
+                task.state === 'downloading' ||
+                task.state === 'launching' ||
+                isQueued ||
+                isPaused
+                  ? h(
+                      Button,
+                      {
+                        variant: 'danger',
+                        size: 'xs',
+                        onClick: () => void store.cancelTask(task),
+                      },
+                      {
+                        default: () =>
+                          h('span', { class: 'emd-btn-inner' }, [
+                            iconSvg(h, ICONS.close, { size: 13 }),
+                            h('span', null, '取消'),
+                          ]),
+                      },
+                    )
+                  : null,
+
+                // 写标签中提示
+                task.state === 'tagging'
+                  ? h(
+                      'span',
+                      { style: { fontSize: '11.5px', color: 'var(--color-text-secondary, #888)' } },
+                      '写入中…',
+                    )
+                  : null,
+
+                // 已完成 / 失败 / 已取消 -> 重新下载 + 移除
+                isEnded
+                  ? h(
+                      Button,
+                      {
+                        variant: 'outline',
+                        size: 'xs',
+                        onClick: () => void store.retryTask(task),
+                      },
+                      {
+                        default: () =>
+                          h('span', { class: 'emd-btn-inner' }, [
+                            iconSvg(h, ICONS.refresh, { size: 13 }),
+                            h('span', null, '重新下载'),
+                          ]),
+                      },
+                    )
+                  : null,
+
+                isEnded
+                  ? h(
+                      Button,
+                      {
+                        variant: 'ghost',
+                        size: 'xs',
+                        onClick: () => void store.removeTask(task),
+                      },
+                      {
+                        default: () =>
+                          h('span', { class: 'emd-btn-inner' }, [
+                            iconSvg(h, ICONS.trash, { size: 13 }),
+                            h('span', null, '移除'),
+                          ]),
+                      },
+                    )
+                  : null,
+              ],
+            ),
+          ],
+        );
       };
 
-      // Tab 0: 下载任务中心
+      // ---- Tab 0：下载队列（Task Manager） ----
       const renderTasksTab = () => {
-        const track = currentTrack.value;
-        const trackMeta = track ? buildSongMeta(track) : null;
         const hasSaveDir = Boolean(store.state.saveDir);
         const counts = taskCounts.value;
 
-        return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } }, [
-          // 当前播放快捷下载横幅
-          h('div', { class: 'emd-quick-banner' }, [
-            h('div', { class: 'emd-quick-track' }, [
-              trackMeta?.coverUrl
-                ? h('img', { class: 'emd-quick-cover', src: trackMeta.coverUrl, alt: '' })
-                : h('div', { class: 'emd-quick-cover' }, [iconSvg(h, ICONS.music, { size: 20 })]),
-              h('div', { class: 'emd-quick-meta' }, [
+        return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '12px' } }, [
+          // 未选择目录时的精简引导提示（无重复下载按钮/音质选择）
+          !hasSaveDir
+            ? h('div', { class: 'emd-dir-alert' }, [
+                h('div', { class: 'emd-dir-alert-left' }, [
+                  iconSvg(h, ICONS.alert, { size: 16 }),
+                  h('span', null, '尚未设置本地保存目录，请先授权保存文件夹以开始下载歌曲。'),
+                ]),
                 h(
-                  'div',
-                  { class: 'emd-quick-title' },
-                  trackMeta?.title
-                    ? `正在播放：${trackMeta.artist ? `${trackMeta.artist} - ` : ''}${trackMeta.title}`
-                    : '当前未播放歌曲',
+                  Button,
+                  { variant: 'solid-primary', size: 'xs', onClick: store.chooseSaveDir },
+                  { default: () => '立即选择目录' },
                 ),
-                h(
-                  'div',
-                  { class: 'emd-quick-sub' },
-                  hasSaveDir
-                    ? `保存目录：${store.state.saveDir} · 音质：${store.state.quality.toUpperCase()} · ${store.state.options.embedTags ? '自动内嵌封面与歌词标签' : '仅下载音频'}`
-                    : '提示：请先点击右上角「选择保存目录」授权本地文件夹',
-                ),
-              ]),
-            ]),
-            h('div', { class: 'emd-pills' }, [
-              ...QUALITY_OPTIONS.map((o) =>
-                h(
-                  'button',
-                  {
-                    class: ['emd-pill', store.state.quality === o.value ? 'emd-pill-active' : ''],
-                    onClick: () => store.setQuality(o.value),
-                  },
-                  o.label,
-                ),
-              ),
-              h(
-                Button,
-                {
-                  variant: 'primary',
-                  size: 'sm',
-                  disabled: !hasSaveDir || !trackMeta?.hash,
-                  onClick: downloadCurrentTrack,
-                },
-                { default: () => '下载当前歌曲' },
-              ),
-            ]),
-          ]),
+              ])
+            : null,
 
-          // 过滤胶囊 + 搜索框
-          h('div', { class: 'emd-toolbar' }, [
-            h('div', { class: 'emd-pills' }, [
-              [
-                { id: 'all', label: `全部 (${counts.all})` },
-                { id: 'active', label: `进行中 (${counts.active})` },
-                { id: 'done', label: `已完成 (${counts.done})` },
-                { id: 'failed', label: `失败 (${counts.failed})` },
-              ].map((f) =>
+          // 队列总控栏
+          h('div', { class: 'emd-control-bar' }, [
+            // Row 1：过滤页签 + 实时聚合速度 + 搜索框
+            h('div', { class: 'emd-control-row' }, [
+              h('div', { class: 'emd-control-group' }, [
                 h(
-                  'button',
-                  {
-                    class: ['emd-pill', taskFilter.value === f.id ? 'emd-pill-active' : ''],
-                    key: f.id,
-                    onClick: () => {
-                      taskFilter.value = f.id;
-                    },
-                  },
-                  f.label,
+                  'div',
+                  { class: 'emd-seg-tabs', role: 'tablist', 'aria-label': '任务状态筛选' },
+                  [
+                    { id: 'all', label: '全部', count: counts.all },
+                    { id: 'active', label: '进行中', count: counts.inProgress },
+                    { id: 'paused', label: '已暂停', count: counts.paused },
+                    { id: 'done', label: '已完成', count: counts.done },
+                    { id: 'ended', label: '已取消/失败', count: counts.ended },
+                  ].map((f) =>
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        role: 'tab',
+                        'aria-selected': taskFilter.value === f.id ? 'true' : 'false',
+                        class: [
+                          'emd-seg-tab',
+                          taskFilter.value === f.id ? 'emd-seg-tab-active' : '',
+                        ],
+                        key: f.id,
+                        onClick: () => {
+                          taskFilter.value = f.id;
+                        },
+                      },
+                      [
+                        h('span', null, f.label),
+                        h('span', { class: 'emd-seg-count' }, String(f.count)),
+                      ],
+                    ),
+                  ),
                 ),
-              ),
-            ]),
-            h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } }, [
-              counts.failed > 0
-                ? h(
-                    Button,
-                    { variant: 'outline', size: 'xs', onClick: store.retryAllFailed },
-                    { default: () => '重试全部失败' },
-                  )
-                : null,
-              counts.done + counts.failed > 0
-                ? h(
-                    Button,
-                    { variant: 'ghost', size: 'xs', onClick: store.clearFinished },
-                    { default: () => '清理已完成/失败' },
-                  )
-                : null,
+
+                counts.downloading > 0
+                  ? h('span', { class: 'emd-speed-chip' }, [
+                      h('span', { class: 'emd-speed-dot' }),
+                      h(
+                        'span',
+                        null,
+                        counts.totalSpeedBytes > 0
+                          ? `↓ ${formatBytes(counts.totalSpeedBytes)}/s · ${counts.downloading} 个进行中`
+                          : `${counts.downloading} 个处理中`,
+                      ),
+                    ])
+                  : null,
+              ]),
+
               h(SongSearchInput, {
                 modelValue: taskSearch.value,
                 placeholder: '搜索下载任务…',
@@ -3129,6 +4777,99 @@ export function activate(ctx) {
                   taskSearch.value = String(v ?? '');
                 },
               }),
+            ]),
+
+            // Row 2：显式全局队列操作（全部暂停 / 全部继续 / 全部取消）+ 批量管理 + 清理
+            h('div', { class: 'emd-control-row' }, [
+              h('div', { class: 'emd-control-group' }, [
+                h(
+                  Button,
+                  {
+                    variant: 'outline',
+                    size: 'xs',
+                    disabled: counts.pausable === 0,
+                    onClick: () => void store.pauseAll(),
+                  },
+                  {
+                    default: () =>
+                      h('span', { class: 'emd-btn-inner' }, [
+                        iconSvg(h, ICONS.pause, { size: 13 }),
+                        h('span', null, counts.pausable > 0 ? `全部暂停 (${counts.pausable})` : '全部暂停'),
+                      ]),
+                  },
+                ),
+                h(
+                  Button,
+                  {
+                    variant: counts.paused > 0 ? 'primary' : 'outline',
+                    size: 'xs',
+                    disabled: counts.paused === 0,
+                    onClick: () => void store.resumeAll(),
+                  },
+                  {
+                    default: () =>
+                      h('span', { class: 'emd-btn-inner' }, [
+                        iconSvg(h, ICONS.play, { size: 13 }),
+                        h('span', null, counts.paused > 0 ? `全部继续 (${counts.paused})` : '全部继续'),
+                      ]),
+                  },
+                ),
+                h(
+                  Button,
+                  {
+                    variant: 'danger',
+                    size: 'xs',
+                    disabled: counts.cancellable === 0,
+                    onClick: requestCancelAllActive,
+                  },
+                  {
+                    default: () =>
+                      h('span', { class: 'emd-btn-inner' }, [
+                        iconSvg(h, ICONS.stop, { size: 13 }),
+                        h('span', null, counts.cancellable > 0 ? `全部取消 (${counts.cancellable})` : '全部取消'),
+                      ]),
+                  },
+                ),
+              ]),
+
+              h('div', { class: 'emd-control-group' }, [
+                h(
+                  Button,
+                  {
+                    variant: batchManageMode.value ? 'primary' : 'outline',
+                    size: 'xs',
+                    disabled: counts.all === 0,
+                    onClick: () => {
+                      if (batchManageMode.value) {
+                        exitBatchManageMode();
+                      } else {
+                        batchManageMode.value = true;
+                      }
+                    },
+                  },
+                  {
+                    default: () =>
+                      h('span', { class: 'emd-btn-inner' }, [
+                        iconSvg(h, ICONS.checkSquare, { size: 13 }),
+                        h('span', null, batchManageMode.value ? '退出批量管理' : '批量管理'),
+                      ]),
+                  },
+                ),
+                counts.failed > 0
+                  ? h(
+                      Button,
+                      { variant: 'outline', size: 'xs', onClick: store.retryAllFailed },
+                      { default: () => `重试失败 (${counts.failed})` },
+                    )
+                  : null,
+                counts.done + counts.ended > 0
+                  ? h(
+                      Button,
+                      { variant: 'ghost', size: 'xs', onClick: store.clearFinished },
+                      { default: () => '清理已完成' },
+                    )
+                  : null,
+              ]),
             ]),
           ]),
 
@@ -3138,8 +4879,8 @@ export function activate(ctx) {
                 'div',
                 { class: 'emd-empty-box' },
                 store.state.tasks.length === 0
-                  ? '暂无下载任务。可在上方一键下载当前播放歌曲，或切换到「歌单与队列批量下载」同步整张歌单。'
-                  : '没有符合筛选条件的下载任务',
+                  ? '暂无下载任务。可切换到「选歌与歌单下载」勾选需要的歌曲，或在播放歌曲时点击页头「下载当前播放」。'
+                  : '当前筛选条件下暂无匹配任务',
               )
             : h(
                 'div',
@@ -3149,88 +4890,108 @@ export function activate(ctx) {
         ]);
       };
 
-      // Tab 1: 歌单与队列批量下载
+      // ---- Tab 1：选歌与歌单下载（零误触安全选歌体验） ----
       const renderBatchTab = () => {
         const hasSaveDir = Boolean(store.state.saveDir);
-        const subfolder =
-          store.state.options.playlistSubfolder && selectedPlaylistTitle.value
-            ? selectedPlaylistTitle.value
-            : '';
+        const sub = currentSubfolder.value;
 
-        return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } }, [
-          // 来源模式切换 + 增量与子目录快捷开关
+        return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '12px' } }, [
+          !hasSaveDir
+            ? h('div', { class: 'emd-dir-alert' }, [
+                h('div', { class: 'emd-dir-alert-left' }, [
+                  iconSvg(h, ICONS.alert, { size: 16 }),
+                  h('span', null, '请先选择保存目录，然后再勾选歌曲加入下载队列。'),
+                ]),
+                h(
+                  Button,
+                  { variant: 'solid-primary', size: 'xs', onClick: store.chooseSaveDir },
+                  { default: () => '立即选择目录' },
+                ),
+              ])
+            : null,
+
+          // 来源切换（分段标签） + 清晰标注的 Switch 开关（非按钮胶囊！）
           h('div', { class: 'emd-toolbar' }, [
-            h('div', { class: 'emd-pills' }, [
-              h(
-                'button',
-                {
-                  class: [
-                    'emd-pill',
-                    batchSourceMode.value === 'user-playlists' ? 'emd-pill-active' : '',
-                  ],
-                  onClick: () => {
-                    batchSourceMode.value = 'user-playlists';
+            h('div', { class: 'emd-control-group' }, [
+              h('div', { class: 'emd-seg-tabs', role: 'tablist', 'aria-label': '选歌来源' }, [
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    class: [
+                      'emd-seg-tab',
+                      batchSourceMode.value === 'user-playlists' ? 'emd-seg-tab-active' : '',
+                    ],
+                    onClick: () => {
+                      batchSourceMode.value = 'user-playlists';
+                    },
                   },
-                },
-                `我的酷狗歌单 (${userPlaylists.value.length})`,
-              ),
-              h(
-                'button',
-                {
-                  class: [
-                    'emd-pill',
-                    batchSourceMode.value === 'playback-queues' ? 'emd-pill-active' : '',
+                  [
+                    h('span', null, '我的酷狗歌单'),
+                    h('span', { class: 'emd-seg-count' }, String(userPlaylists.value.length)),
                   ],
-                  onClick: () => {
-                    batchSourceMode.value = 'playback-queues';
+                ),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    class: [
+                      'emd-seg-tab',
+                      batchSourceMode.value === 'playback-queues' ? 'emd-seg-tab-active' : '',
+                    ],
+                    onClick: () => {
+                      batchSourceMode.value = 'playback-queues';
+                    },
                   },
-                },
-                `播放队列 (${playbackQueues.value.length})`,
-              ),
+                  [
+                    h('span', null, '播放队列'),
+                    h('span', { class: 'emd-seg-count' }, String(playbackQueues.value.length)),
+                  ],
+                ),
+              ]),
+
               batchSourceMode.value === 'user-playlists'
                 ? h(
-                    'button',
+                    Button,
                     {
-                      class: 'emd-pill',
+                      variant: 'ghost',
+                      size: 'xs',
+                      disabled: loadingPlaylists.value,
                       onClick: loadUserPlaylists,
                     },
-                    loadingPlaylists.value ? '刷新中…' : '↻ 刷新歌单',
+                    {
+                      default: () =>
+                        h('span', { class: 'emd-btn-inner' }, [
+                          iconSvg(h, ICONS.refresh, { size: 13 }),
+                          h('span', null, loadingPlaylists.value ? '刷新中…' : '刷新歌单'),
+                        ]),
+                    },
                   )
                 : null,
             ]),
 
-            h('div', { class: 'emd-pills' }, [
-              h(
-                'button',
-                {
-                  class: [
-                    'emd-pill',
-                    store.state.options.playlistSubfolder ? 'emd-pill-active' : '',
-                  ],
-                  onClick: () =>
-                    store.saveOptions({
-                      playlistSubfolder: !store.state.options.playlistSubfolder,
-                    }),
-                },
-                store.state.options.playlistSubfolder
-                  ? '📁 按歌单建子文件夹：开启'
-                  : '📁 按歌单建子文件夹：关闭',
-              ),
-              h(
-                'button',
-                {
-                  class: ['emd-pill', store.state.options.skipExisting ? 'emd-pill-active' : ''],
-                  onClick: () =>
-                    store.saveOptions({ skipExisting: !store.state.options.skipExisting }),
-                },
-                store.state.options.skipExisting
-                  ? '⚡ 增量跳过已下载：开启'
-                  : '⚡ 增量跳过已下载：关闭',
-              ),
+            h('div', { class: 'emd-switch-group' }, [
+              h('label', { class: 'emd-switch-item' }, [
+                h(Switch, {
+                  size: 'sm',
+                  modelValue: store.state.options.playlistSubfolder,
+                  'onUpdate:modelValue': (v) =>
+                    store.saveOptions({ playlistSubfolder: Boolean(v) }),
+                }),
+                h('span', null, '按歌单建子目录'),
+              ]),
+              h('label', { class: 'emd-switch-item' }, [
+                h(Switch, {
+                  size: 'sm',
+                  modelValue: store.state.options.skipExisting,
+                  'onUpdate:modelValue': (v) => store.saveOptions({ skipExisting: Boolean(v) }),
+                }),
+                h('span', null, '自动跳过已下载'),
+              ]),
             ]),
           ]),
 
-          // 歌单卡片横向流
+          // 歌单 / 队列横向选择条
           batchSourceMode.value === 'user-playlists'
             ? userPlaylists.value.length === 0
               ? h(
@@ -3247,6 +5008,7 @@ export function activate(ctx) {
                     h(
                       'button',
                       {
+                        type: 'button',
                         class: [
                           'emd-playlist-card',
                           selectedPlaylistKey.value === pl.key ? 'emd-playlist-card-active' : '',
@@ -3277,6 +5039,7 @@ export function activate(ctx) {
                     h(
                       'button',
                       {
+                        type: 'button',
                         class: [
                           'emd-playlist-card',
                           selectedPlaylistKey.value === q.id ? 'emd-playlist-card-active' : '',
@@ -3301,43 +5064,20 @@ export function activate(ctx) {
                   ),
                 ),
 
-          // 批量操作栏 + 搜索
-          h('div', { class: 'emd-toolbar' }, [
-            h('div', { class: 'emd-pills' }, [
+          // 当前歌单信息 + 搜索框（顶部不再放置高危“一键下载整张歌单”按钮）
+          h('div', { class: 'emd-playlist-meta-bar' }, [
+            h('div', null, [
               h(
-                'button',
-                { class: 'emd-pill', onClick: selectAllFiltered },
-                `全选全部 (${filteredBatchSongs.value.length})`,
-              ),
-              selectedHashes.value.size > 0
-                ? h(
-                    'button',
-                    { class: 'emd-pill', onClick: clearSelection },
-                    `取消已选 (${selectedHashes.value.size})`,
-                  )
-                : null,
-              h(
-                Button,
-                {
-                  variant: 'primary',
-                  size: 'xs',
-                  disabled: !hasSaveDir || selectedHashes.value.size === 0,
-                  onClick: downloadSelectedBatch,
-                },
-                { default: () => `下载已选 (${selectedHashes.value.size})` },
+                'span',
+                { class: 'emd-playlist-meta-title' },
+                selectedPlaylistTitle.value || '歌曲列表',
               ),
               h(
-                Button,
-                {
-                  variant: 'outline',
-                  size: 'xs',
-                  disabled: !hasSaveDir || filteredBatchSongs.value.length === 0,
-                  onClick: downloadAllInPlaylist,
-                },
-                { default: () => `一键同步整张歌单 (${filteredBatchSongs.value.length})` },
+                'span',
+                { class: 'emd-playlist-meta-sub' },
+                `共 ${filteredBatchSongs.value.length} 首${localCountInFiltered.value > 0 ? ` · 本地已有 ${localCountInFiltered.value} 首` : ''} · 点击行仅勾选，底部操作栏确认后才开始下载`,
               ),
             ]),
-
             h(SongSearchInput, {
               modelValue: batchSearch.value,
               placeholder: '在当前歌单中搜索歌名/歌手…',
@@ -3347,7 +5087,7 @@ export function activate(ctx) {
             }),
           ]),
 
-          // 歌曲列表
+          // 歌曲勾选列表
           loadingSongs.value
             ? h('div', { class: 'emd-empty-box' }, '正在加载歌单全量曲目，请稍候…')
             : filteredBatchSongs.value.length === 0
@@ -3356,47 +5096,67 @@ export function activate(ctx) {
                   ...visibleBatchSongs.value.map((song, idx) => {
                     const meta = buildSongMeta(song);
                     const checked = selectedHashes.value.has(meta.hash);
-                    const alreadyDone = store.isSongAlreadyDownloaded(song, subfolder);
-                    return h('div', { class: 'emd-song-item', key: `${meta.hash}-${idx}` }, [
-                      h('input', {
-                        type: 'checkbox',
-                        checked,
-                        onChange: () => toggleSongCheck(meta.hash),
-                      }),
-                      h(
-                        'div',
-                        {
-                          class: 'emd-song-item-main',
-                          onClick: () => toggleSongCheck(meta.hash),
-                        },
-                        [
-                          h('div', { style: { minWidth: 0, flex: 1 } }, [
-                            h('div', { class: 'emd-song-item-title' }, meta.title || '未知歌曲'),
-                            h(
-                              'div',
-                              { class: 'emd-song-item-sub' },
-                              `${meta.artist || '未知歌手'}${meta.album ? ` · 《${meta.album}》` : ''}`,
-                            ),
-                          ]),
-                          alreadyDone
-                            ? h('span', { class: 'emd-badge emd-badge-state-done' }, '✓ 已在本地')
-                            : null,
-                        ],
-                      ),
-                      h(
-                        'button',
-                        {
-                          class: 'emd-action-icon',
-                          title: '立即下载此歌曲',
-                          disabled: !hasSaveDir,
-                          onClick: () =>
-                            store.enqueueSongs([song], {
-                              playlistName: selectedPlaylistTitle.value,
-                            }),
-                        },
-                        [iconSvg(h, ICONS.download, { size: 15 })],
-                      ),
-                    ]);
+                    const alreadyDone = store.isSongAlreadyDownloaded(song, sub);
+                    const inQueue = store.isSongInActiveQueue(song);
+
+                    return h(
+                      'div',
+                      {
+                        class: ['emd-song-item', checked ? 'emd-song-item-selected' : ''],
+                        key: `${meta.hash}-${idx}`,
+                      },
+                      [
+                        renderCheckbox({
+                          checked,
+                          ariaLabel: `勾选歌曲 ${meta.title}`,
+                          onChange: () => toggleSongCheck(meta.hash),
+                        }),
+                        h(
+                          'div',
+                          {
+                            class: 'emd-song-item-main',
+                            onClick: () => toggleSongCheck(meta.hash),
+                          },
+                          [
+                            h('div', { style: { minWidth: 0, flex: 1 } }, [
+                              h('div', { class: 'emd-song-item-title' }, meta.title || '未知歌曲'),
+                              h(
+                                'div',
+                                { class: 'emd-song-item-sub' },
+                                `${meta.artist || '未知歌手'}${meta.album ? ` · 《${meta.album}》` : ''}`,
+                              ),
+                            ]),
+                            h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } }, [
+                              inQueue
+                                ? h('span', { class: 'emd-badge emd-badge-state-queued' }, '队列中')
+                                : null,
+                              alreadyDone
+                                ? h('span', { class: 'emd-badge emd-badge-state-done' }, '✓ 已在本地')
+                                : null,
+                            ]),
+                          ],
+                        ),
+                        // 视觉隔离的最右侧单曲快捷下载图标（带 tooltip 且不与行勾选冲突）
+                        h('span', { class: 'emd-row-quick-sep', 'aria-hidden': 'true' }),
+                        h(
+                          'button',
+                          {
+                            type: 'button',
+                            class: 'emd-row-quick-dl',
+                            title: `仅下载此单曲：${meta.title || '未知歌曲'}`,
+                            'aria-label': `仅下载此单曲 ${meta.title || ''}`,
+                            disabled: !hasSaveDir || inQueue,
+                            onClick: (e) => {
+                              e.stopPropagation();
+                              void store.enqueueSongs([song], {
+                                playlistName: selectedPlaylistTitle.value,
+                              });
+                            },
+                          },
+                          [iconSvg(h, ICONS.download, { size: 14 })],
+                        ),
+                      ],
+                    );
                   }),
                   filteredBatchSongs.value.length > visibleBatchSongs.value.length
                     ? h(
@@ -3420,7 +5180,7 @@ export function activate(ctx) {
                             },
                             {
                               default: () =>
-                                `加载更多（已显示 ${visibleBatchSongs.value.length} / 共 ${filteredBatchSongs.value.length} 首，点击「全选全部」可直接包含未展开歌曲）`,
+                                `展开更多曲目（已显示 ${visibleBatchSongs.value.length} / 共 ${filteredBatchSongs.value.length} 首）`,
                             },
                           ),
                         ],
@@ -3430,9 +5190,385 @@ export function activate(ctx) {
         ]);
       };
 
+      // ---- 底部常驻吸底操作栏（Tab 0 批量管理栏 / Tab 1 安全选歌操作栏） ----
+      const renderStickyBottomBar = () => {
+        // Tab 0 批量操作栏
+        if (
+          activeTabIndex.value === 0 &&
+          (batchManageMode.value || selectedTaskIds.value.size > 0)
+        ) {
+          const stats = selectedTaskStats.value;
+          const ids = new Set(selectedTaskIds.value);
+
+          return h('div', { class: 'emd-bottom-bar', role: 'region', 'aria-label': '任务批量操作栏' }, [
+            h('div', { class: 'emd-bottom-bar-info' }, [
+              h('span', { class: 'emd-bottom-bar-count' }, `已选 ${stats.total} 项`),
+              h(
+                Button,
+                {
+                  variant: 'ghost',
+                  size: 'xs',
+                  disabled: filteredTasks.value.length === 0,
+                  onClick: selectAllCurrentTasks,
+                },
+                { default: () => '全选当前视图' },
+              ),
+              h(
+                Button,
+                {
+                  variant: 'ghost',
+                  size: 'xs',
+                  disabled: filteredTasks.value.length === 0,
+                  onClick: invertCurrentTasks,
+                },
+                { default: () => '反选' },
+              ),
+            ]),
+
+            h('div', { class: 'emd-bottom-bar-actions' }, [
+              h(
+                Button,
+                {
+                  variant: 'outline',
+                  size: 'xs',
+                  disabled: stats.pausable === 0,
+                  onClick: () => void store.batchPause(ids),
+                },
+                { default: () => `批量暂停${stats.pausable > 0 ? ` (${stats.pausable})` : ''}` },
+              ),
+              h(
+                Button,
+                {
+                  variant: stats.paused > 0 ? 'primary' : 'outline',
+                  size: 'xs',
+                  disabled: stats.paused === 0,
+                  onClick: () => void store.batchResume(ids),
+                },
+                { default: () => `批量继续${stats.paused > 0 ? ` (${stats.paused})` : ''}` },
+              ),
+              h(
+                Button,
+                {
+                  variant: 'danger',
+                  size: 'xs',
+                  disabled: stats.cancellable === 0,
+                  onClick: requestBatchCancel,
+                },
+                { default: () => `批量取消${stats.cancellable > 0 ? ` (${stats.cancellable})` : ''}` },
+              ),
+              h(
+                Button,
+                {
+                  variant: 'outline',
+                  size: 'xs',
+                  disabled: stats.retryable === 0,
+                  onClick: () => store.batchRetry(ids),
+                },
+                { default: () => `批量重试${stats.retryable > 0 ? ` (${stats.retryable})` : ''}` },
+              ),
+              h(
+                Button,
+                {
+                  variant: 'danger',
+                  size: 'xs',
+                  disabled: stats.total === 0,
+                  onClick: requestBatchRemove,
+                },
+                { default: () => '批量删除' },
+              ),
+              h(
+                Button,
+                {
+                  variant: 'ghost',
+                  size: 'xs',
+                  onClick: exitBatchManageMode,
+                },
+                { default: () => '退出批量' },
+              ),
+            ]),
+          ]);
+        }
+
+        // Tab 1 选歌确认吸底栏
+        if (activeTabIndex.value === 1 && batchSongs.value.length > 0) {
+          const hasSaveDir = Boolean(store.state.saveDir);
+          const summary = selectionSummary.value;
+          const skipExisting = Boolean(store.state.options.skipExisting);
+
+          const summaryText =
+            summary.selectedCount === 0
+              ? `尚未勾选歌曲（当前歌单 ${filteredBatchSongs.value.length} 首，${localCountInFiltered.value} 首已在本地）`
+              : skipExisting
+                ? `已勾选 ${summary.selectedCount} 首（其中 ${summary.skippedExistingCount} 首已在本地，将自动跳过${summary.inQueueCount > 0 ? `，${summary.inQueueCount} 首已在队列` : ''}，实际将下载 ${summary.actualCount} 首）`
+                : `已勾选 ${summary.selectedCount} 首（已关闭跳过重复${summary.inQueueCount > 0 ? `，${summary.inQueueCount} 首已在队列` : ''}，实际将下载 ${summary.actualCount} 首）`;
+
+          return h('div', { class: 'emd-bottom-bar', role: 'region', 'aria-label': '选歌批量操作栏' }, [
+            h('div', { class: 'emd-bottom-bar-info' }, [
+              h(
+                'span',
+                {
+                  class:
+                    summary.selectedCount > 0 ? 'emd-bottom-bar-count' : 'emd-bottom-bar-sub',
+                },
+                summaryText,
+              ),
+            ]),
+
+            h('div', { class: 'emd-bottom-bar-actions' }, [
+              h(
+                Button,
+                {
+                  variant: 'ghost',
+                  size: 'xs',
+                  disabled: summary.selectedCount === 0,
+                  onClick: clearSongSelection,
+                },
+                { default: () => '清空选择' },
+              ),
+              h(
+                Button,
+                {
+                  variant: 'outline',
+                  size: 'xs',
+                  disabled: visibleBatchSongs.value.length === 0,
+                  onClick: selectVisibleBatchSongs,
+                },
+                { default: () => `勾选当前已显示 (${visibleBatchSongs.value.length})` },
+              ),
+              h(
+                Button,
+                {
+                  variant: 'outline',
+                  size: 'xs',
+                  disabled: filteredBatchSongs.value.length === 0,
+                  onClick: selectAllPlaylistSongs,
+                },
+                { default: () => `全选本歌单 (${filteredBatchSongs.value.length} 首)` },
+              ),
+              h(
+                Button,
+                {
+                  variant: 'solid-primary',
+                  size: 'sm',
+                  disabled: !hasSaveDir || summary.actualCount === 0,
+                  onClick: prepareBatchDownload,
+                },
+                {
+                  default: () =>
+                    h('span', { class: 'emd-btn-inner' }, [
+                      iconSvg(h, ICONS.download, { size: 15 }),
+                      h('span', null, `准备下载 (${summary.actualCount} 首)`),
+                    ]),
+                },
+              ),
+            ]),
+          ]);
+        }
+
+        return null;
+      };
+
+      // ---- 防误操作：批量下载确认弹窗（ConfirmDownloadModal） ----
+      const renderDownloadConfirmModal = () => {
+        const data = downloadConfirmState.value;
+        if (!data) return null;
+        const targetPath = data.subfolder
+          ? `${store.state.saveDir}/${data.subfolder}`
+          : store.state.saveDir;
+
+        return renderModalPortal(
+          h(
+            'div',
+            {
+              class: 'emd-modal-backdrop',
+              role: 'dialog',
+              'aria-modal': 'true',
+              'aria-label': '确认批量下载',
+              onClick: (e) => {
+                if (e.target === e.currentTarget) downloadConfirmState.value = null;
+              },
+            },
+            [
+              h('div', { class: 'emd-modal-card' }, [
+                h('div', { class: 'emd-modal-header' }, [
+                  h('div', { class: 'emd-modal-icon emd-modal-icon-primary' }, [
+                    iconSvg(h, ICONS.download, { size: 18 }),
+                  ]),
+                  h('h3', { class: 'emd-modal-title' }, `确认批量下载（${data.actualCount} 首）`),
+                ]),
+
+                h('div', { class: 'emd-modal-body' }, [
+                  h(
+                    'div',
+                    null,
+                    '请确认以下下载信息，防止误点导致一次性下载大量歌曲：',
+                  ),
+
+                  h('div', { class: 'emd-modal-summary' }, [
+                    h('div', { class: 'emd-modal-row' }, [
+                      h('span', { class: 'emd-modal-row-label' }, '实际将加入队列'),
+                      h(
+                        'span',
+                        { class: 'emd-modal-row-val emd-modal-row-val-accent' },
+                        `${data.actualCount} 首歌曲`,
+                      ),
+                    ]),
+                    h('div', { class: 'emd-modal-row' }, [
+                      h('span', { class: 'emd-modal-row-label' }, '自动跳过已存在'),
+                      h(
+                        'span',
+                        { class: 'emd-modal-row-val' },
+                        data.skippedExistingCount > 0
+                          ? `${data.skippedExistingCount} 首（本地已有）`
+                          : store.state.options.skipExisting
+                            ? '0 首'
+                            : '未开启自动跳过',
+                      ),
+                    ]),
+                    data.inQueueCount > 0
+                      ? h('div', { class: 'emd-modal-row' }, [
+                          h('span', { class: 'emd-modal-row-label' }, '已在队列中跳过'),
+                          h('span', { class: 'emd-modal-row-val' }, `${data.inQueueCount} 首`),
+                        ])
+                      : null,
+                    h('div', { class: 'emd-modal-row' }, [
+                      h('span', { class: 'emd-modal-row-label' }, '目标保存位置'),
+                      h('span', { class: 'emd-modal-row-val' }, targetPath || '未设置'),
+                    ]),
+                    h('div', { class: 'emd-modal-row' }, [
+                      h('span', { class: 'emd-modal-row-label' }, '下载音质'),
+                      h('span', { class: 'emd-modal-row-val' }, data.qualityLabel),
+                    ]),
+                    h('div', { class: 'emd-modal-row' }, [
+                      h('span', { class: 'emd-modal-row-label' }, '标签与歌词'),
+                      h('span', { class: 'emd-modal-row-val' }, data.tagSummary),
+                    ]),
+                  ]),
+
+                  data.previewNames.length > 0
+                    ? h(
+                        'div',
+                        { class: 'emd-modal-preview' },
+                        `包含曲目：${data.previewNames.join('、')}${data.actualCount > data.previewNames.length ? ` 等共 ${data.actualCount} 首` : ''}`,
+                      )
+                    : null,
+                ]),
+
+                h('div', { class: 'emd-modal-footer' }, [
+                  h(
+                    Button,
+                    {
+                      variant: 'ghost',
+                      size: 'sm',
+                      onClick: () => {
+                        downloadConfirmState.value = null;
+                      },
+                    },
+                    { default: () => '取消' },
+                  ),
+                  h(
+                    Button,
+                    {
+                      variant: 'outline',
+                      size: 'sm',
+                      onClick: () => void executeConfirmedDownload(true),
+                    },
+                    { default: () => '加入队列但先暂停（稍后手动开始）' },
+                  ),
+                  h(
+                    Button,
+                    {
+                      variant: 'solid-primary',
+                      size: 'sm',
+                      onClick: () => void executeConfirmedDownload(false),
+                    },
+                    { default: () => `确认开始下载 (${data.actualCount} 首)` },
+                  ),
+                ]),
+              ]),
+            ],
+          ),
+        );
+      };
+
+      // ---- 安全取消确认弹窗（ConfirmCancelModal） ----
+      const renderCancelConfirmModal = () => {
+        const data = cancelConfirmState.value;
+        if (!data) return null;
+
+        const breakdownParts = [];
+        if (data.running > 0) breakdownParts.push(`下载/处理中 ${data.running} 个`);
+        if (data.queued > 0) breakdownParts.push(`排队中 ${data.queued} 个`);
+        if (data.paused > 0) breakdownParts.push(`已暂停 ${data.paused} 个`);
+
+        return renderModalPortal(
+          h(
+            'div',
+            {
+              class: 'emd-modal-backdrop',
+              role: 'dialog',
+              'aria-modal': 'true',
+              'aria-label': data.title,
+              onClick: (e) => {
+                if (e.target === e.currentTarget) cancelConfirmState.value = null;
+              },
+            },
+            [
+              h('div', { class: 'emd-modal-card' }, [
+                h('div', { class: 'emd-modal-header' }, [
+                  h('div', { class: 'emd-modal-icon emd-modal-icon-danger' }, [
+                    iconSvg(h, ICONS.alert, { size: 18 }),
+                  ]),
+                  h('h3', { class: 'emd-modal-title' }, data.title),
+                ]),
+
+                h('div', { class: 'emd-modal-body' }, [
+                  h(
+                    'div',
+                    null,
+                    `此操作将立即终止 ${data.total} 个任务（${breakdownParts.join('，') || `${data.total} 个`}）。`,
+                  ),
+                  data.extraNote ? h('div', null, data.extraNote) : null,
+                  h(
+                    'div',
+                    { class: 'emd-modal-preview' },
+                    '提示：已经下载完成的音频文件不会被删除；取消后的记录仍可在队列中随时点击「重新下载」。',
+                  ),
+                ]),
+
+                h('div', { class: 'emd-modal-footer' }, [
+                  h(
+                    Button,
+                    {
+                      variant: 'outline',
+                      size: 'sm',
+                      onClick: () => {
+                        cancelConfirmState.value = null;
+                      },
+                    },
+                    { default: () => '取消' },
+                  ),
+                  h(
+                    Button,
+                    {
+                      variant: 'danger',
+                      size: 'sm',
+                      onClick: () => void data.onConfirm(),
+                    },
+                    { default: () => data.confirmLabel },
+                  ),
+                ]),
+              ]),
+            ],
+          ),
+        );
+      };
+
       return () => {
         const counts = taskCounts.value;
         const hasSaveDir = Boolean(store.state.saveDir);
+        const playingMeta = currentTrackMeta.value;
+        const hasPlayingSong = Boolean(playingMeta?.hash);
 
         return h('div', { class: 'emd-root h-full flex flex-col min-h-0' }, [
           h(
@@ -3441,17 +5577,17 @@ export function activate(ctx) {
             {
               default: () =>
                 h('div', { class: 'select-none min-h-full flex flex-col' }, [
-                  // 1. EchoMusic v2.3.x 原生 SliverHeader
+                  // 1. EchoMusic v2.3.x 原生 SliverHeader（仅汇总状态 + 最多两个清晰按钮）
                   h(
                     DetailPageSliverHeader,
                     {
                       ref: headerRef,
-                      typeLabel: '音乐下载与标签内嵌中心',
+                      typeLabel: '音乐下载与任务管理中心',
                       title: '歌曲下载',
                       coverUrl: HEADER_COVER_SVG,
                       hasDetails: true,
                       distributeDetails: true,
-                      expandedHeight: 176,
+                      expandedHeight: 168,
                       collapsedHeight: 56,
                     },
                     {
@@ -3460,27 +5596,30 @@ export function activate(ctx) {
                           'div',
                           {
                             class: 'flex flex-col justify-between text-[12px] text-text-secondary',
-                            style: { minHeight: '52px' },
+                            style: { minHeight: '48px' },
                           },
                           [
-                            h('div', { class: 'flex flex-wrap items-center gap-x-4 gap-y-1 font-medium' }, [
-                              h(
-                                'span',
-                                null,
-                                hasSaveDir ? `目录：${store.state.saveDir}` : '尚未授权保存目录',
-                              ),
-                              h('span', null, `进行中 ${counts.active}`),
-                              h('span', null, `已完成 ${counts.done}`),
-                              h(
-                                'span',
-                                null,
-                                `音质：${store.state.quality === 'flac' ? '无损 FLAC 优先' : `${store.state.quality}kbps`}`,
-                              ),
-                            ]),
+                            h(
+                              'div',
+                              { class: 'flex flex-wrap items-center gap-x-4 gap-y-1 font-medium' },
+                              [
+                                h(
+                                  'span',
+                                  null,
+                                  hasSaveDir
+                                    ? `目录：${store.state.saveDir}`
+                                    : '目录：尚未授权保存目录',
+                                ),
+                                h('span', null, `进行中 ${counts.inProgress}`),
+                                h('span', null, `已暂停 ${counts.paused}`),
+                                h('span', null, `已完成 ${counts.done}`),
+                                h('span', null, `音质：${qualityLabelOf(store.state.quality)}`),
+                              ],
+                            ),
                             h(
                               'div',
                               { class: 'line-clamp-1 text-[11.5px] opacity-80' },
-                              '支持 MP3(ID3v2.3) / FLAC(Vorbis+Picture) 封面与歌词内嵌、双语 .lrc 导出、用户歌单增量同步与灰歌解灰下载',
+                              '支持单曲/批量/全局暂停与取消、防误触选歌确认、ID3v2.3/FLAC 标签与封面内嵌及双语 .lrc 导出',
                             ),
                           ],
                         ),
@@ -3489,46 +5628,57 @@ export function activate(ctx) {
                           h(
                             Button,
                             {
-                              variant: 'primary',
+                              variant: hasSaveDir ? 'outline' : 'solid-primary',
                               size: 'sm',
-                              disabled: !hasSaveDir || !currentTrack.value?.hash,
-                              onClick: downloadCurrentTrack,
+                              onClick: store.chooseSaveDir,
                             },
                             {
-                              default: () => [
-                                iconSvg(h, ICONS.download, { size: 15 }),
-                                h('span', null, '下载当前播放'),
-                              ],
+                              default: () =>
+                                h('span', { class: 'emd-btn-inner' }, [
+                                  iconSvg(h, ICONS.folder, { size: 15 }),
+                                  h('span', null, hasSaveDir ? '更换保存目录' : '选择保存目录'),
+                                ]),
                             },
                           ),
-                          h(
-                            Button,
-                            { variant: 'outline', size: 'sm', onClick: store.chooseSaveDir },
-                            {
-                              default: () => [
-                                iconSvg(h, ICONS.folder, { size: 15 }),
-                                h('span', null, hasSaveDir ? '更换保存目录' : '选择保存目录'),
-                              ],
-                            },
-                          ),
+                          hasPlayingSong
+                            ? h(
+                                Button,
+                                {
+                                  variant: 'primary',
+                                  size: 'sm',
+                                  disabled: !hasSaveDir,
+                                  tooltip: `下载当前播放：${playingMeta.artist ? `${playingMeta.artist} - ` : ''}${playingMeta.title}`,
+                                  onClick: downloadCurrentTrack,
+                                },
+                                {
+                                  default: () =>
+                                    h('span', { class: 'emd-btn-inner' }, [
+                                      iconSvg(h, ICONS.download, { size: 15 }),
+                                      h('span', null, '下载当前播放'),
+                                    ]),
+                                },
+                              )
+                            : null,
                         ]),
                       'collapsed-actions': () =>
                         h('div', { class: 'flex items-center gap-1.5' }, [
                           h(
                             Button,
-                            {
-                              variant: 'primary',
-                              size: 'xs',
-                              disabled: !hasSaveDir || !currentTrack.value?.hash,
-                              onClick: downloadCurrentTrack,
-                            },
-                            { default: () => '下载当前' },
-                          ),
-                          h(
-                            Button,
                             { variant: 'ghost', size: 'xs', onClick: store.chooseSaveDir },
                             { default: () => '目录' },
                           ),
+                          hasPlayingSong
+                            ? h(
+                                Button,
+                                {
+                                  variant: 'primary',
+                                  size: 'xs',
+                                  disabled: !hasSaveDir,
+                                  onClick: downloadCurrentTrack,
+                                },
+                                { default: () => '下载当前' },
+                              )
+                            : null,
                         ]),
                     },
                   ),
@@ -3555,7 +5705,7 @@ export function activate(ctx) {
                                 class:
                                   'w-auto! justify-start! bg-transparent! p-0! h-auto! gap-6! border-none!',
                                 modelValue: activeTabIndex.value,
-                                tabs: ['下载任务', '歌单与队列批量下载', '下载与标签内嵌设置'],
+                                tabs: ['下载队列', '选歌与歌单下载', '下载与标签设置'],
                                 'onUpdate:modelValue': (idx) => {
                                   activeTabIndex.value = Number(idx) || 0;
                                 },
@@ -3567,15 +5717,20 @@ export function activate(ctx) {
                                     index === 0 && counts.all > 0
                                       ? h(Badge, {
                                           count: counts.all,
-                                          tone: selected ? 'primary' : 'muted',
+                                          tone: selected ? 'accent' : 'muted',
                                         })
                                       : null,
-                                    index === 1 && batchSongs.value.length > 0
+                                    index === 1 && selectedHashes.value.size > 0
                                       ? h(Badge, {
-                                          count: batchSongs.value.length,
-                                          tone: selected ? 'primary' : 'muted',
+                                          count: selectedHashes.value.size,
+                                          tone: 'accent',
                                         })
-                                      : null,
+                                      : index === 1 && batchSongs.value.length > 0
+                                        ? h(Badge, {
+                                            count: batchSongs.value.length,
+                                            tone: selected ? 'accent' : 'muted',
+                                          })
+                                        : null,
                                   ]),
                               },
                             ),
@@ -3595,6 +5750,13 @@ export function activate(ctx) {
                 ]),
             },
           ),
+
+          // 4. 吸底操作栏（与 PageScrollContainer 垂直并列，绝不被裁切或遮挡）
+          renderStickyBottomBar(),
+
+          // 5. 防误操作确认弹窗
+          renderDownloadConfirmModal(),
+          renderCancelConfirmModal(),
         ]);
       };
     },
@@ -3602,7 +5764,7 @@ export function activate(ctx) {
 
   // 宿主插件设置面板
   const SettingsPanel = defineComponent({
-    name: 'EchoMusicDownloadSettingsV22',
+    name: 'EchoMusicDownloadSettingsV23',
     setup() {
       return () => renderSettingsCards();
     },
@@ -3636,7 +5798,7 @@ export function activate(ctx) {
   ctx.ui.settings.define({
     id: 'echo-music-download',
     title: '歌曲下载',
-    description: '保存目录、音质、ID3v2.3/FLAC 标签与封面内嵌、双语 .lrc 导出及歌单增量同步',
+    description: '保存目录、音质、ID3v2.3/FLAC 标签与封面内嵌、双语 .lrc 导出及防误触歌单下载',
     component: SettingsPanel,
   });
 

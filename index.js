@@ -1892,6 +1892,10 @@ export const createDownloadStore = (ctx) => {
       clearTimeout(task._nativeWatchdog);
       task._nativeWatchdog = null;
     }
+    if (task?._nativePoller) {
+      clearInterval(task._nativePoller);
+      task._nativePoller = null;
+    }
   };
 
   // 通道 2：主进程 Node Axios 直连下载 + ctx.fs.writeFile 落盘（绕开 echo-plugin-downloads Session 卡死）
@@ -2045,32 +2049,16 @@ export const createDownloadStore = (ctx) => {
     let terminatedSynchronously = false;
     let receivedAnyBytes = false;
 
-    // 10s 零字节停滞看门狗：原生下载卡在 connecting 时自动无感回退至主进程直连 / aria2c
-    task._nativeWatchdog = setTimeout(() => {
-      if (receivedAnyBytes || task._runToken !== myToken) return;
-      if (!['downloading', 'launching'].includes(task.state)) return;
-      console.warn('[echo-music-download] 原生下载 10s 无字节到达，自动切换直连/aria2c:', task.name);
-      const staleHandle = task._handle;
-      detachNativeHandle(task, { clearHandle: true });
-      if (staleHandle && typeof staleHandle.cancel === 'function') {
-        try {
-          void staleHandle.cancel();
-        } catch {}
-      }
-      if (fallbackUrl) {
-        void fallbackDownloadChain(task, fallbackUrl, fallbackHeaders, myToken, '原生通道连接超时(10s)');
-      } else {
-        failTask(task, '连接下载服务器超时（10s 无响应），请点「重试」或「换源重下」', myToken);
-      }
-    }, 10000);
-
-    const unsub = handle.subscribe((s) => {
+    const applyNativeSnapshot = (s) => {
       if (!s || task._handle !== handle || task._runToken !== myToken) return;
       if (task.state === 'canceled' || task.state === 'done') return;
 
-      if (Number(s.receivedBytes || 0) > 0) {
+      if (Number(s.receivedBytes || 0) > 0 || s.state === 'completed' || s.state === 'verifying' || s.state === 'committing') {
         receivedAnyBytes = true;
-        clearNativeWatchdog(task);
+        if (task._nativeWatchdog) {
+          clearTimeout(task._nativeWatchdog);
+          task._nativeWatchdog = null;
+        }
       }
 
       if (s.totalBytes && s.totalBytes > 0) {
@@ -2158,10 +2146,90 @@ export const createDownloadStore = (ctx) => {
           task.state = 'downloading';
         }
       }
-    });
+    };
+
+    // 主动 1s 轮询 handle.getSnapshot()：防止宿主 IPC 推送丢失导致已下完却卡 0% / 误报超时
+    if (typeof handle.getSnapshot === 'function') {
+      task._nativePoller = setInterval(() => {
+        if (task._handle !== handle || task._runToken !== myToken) {
+          clearNativeWatchdog(task);
+          return;
+        }
+        if (!['downloading', 'launching'].includes(task.state)) return;
+        void Promise.resolve(handle.getSnapshot())
+          .then((snap) => {
+            if (snap) applyNativeSnapshot(snap);
+          })
+          .catch(() => {});
+      }, 1000);
+    }
+
+    // 10s 零字节看门狗：触发前先主动复核 getSnapshot() 与磁盘文件，确认未完成才回退
+    task._nativeWatchdog = setTimeout(() => {
+      void (async () => {
+        if (receivedAnyBytes || task._runToken !== myToken) return;
+        if (!['downloading', 'launching'].includes(task.state)) return;
+
+        // 1. 先主动查一次主进程快照，防止事件漏推导致“其实已下完却误报超时”
+        if (typeof handle.getSnapshot === 'function') {
+          try {
+            const snap = await handle.getSnapshot();
+            if (snap) {
+              applyNativeSnapshot(snap);
+              if (
+                receivedAnyBytes ||
+                task._runToken !== myToken ||
+                !['downloading', 'launching'].includes(task.state)
+              ) {
+                return;
+              }
+            }
+          } catch {}
+        }
+
+        // 2. 再检查目标文件是否已落盘（size > 1KB）
+        if (state.saveDirRef?.id && task.fileName && typeof ctx?.fs?.stat === 'function') {
+          try {
+            const st = await ctx.fs.stat({
+              kind: 'directory-file',
+              directoryId: state.saveDirRef.id,
+              relativePath: task.fileName,
+            });
+            if (st && Number(st.size || 0) > 1024) {
+              clearNativeWatchdog(task);
+              detachNativeHandle(task, { clearHandle: true });
+              const finalPath = `${state.saveDir}/${task.fileName}`;
+              void finalizeTaskSuccess(task, task.fileName, finalPath, myToken);
+              return;
+            }
+          } catch {}
+        }
+
+        if (receivedAnyBytes || task._runToken !== myToken) return;
+        if (!['downloading', 'launching'].includes(task.state)) return;
+
+        console.warn('[echo-music-download] 原生下载 10s 无字节到达，自动切换直连/aria2c:', task.name);
+        clearNativeWatchdog(task);
+        const staleHandle = task._handle;
+        detachNativeHandle(task, { clearHandle: true });
+        if (staleHandle && typeof staleHandle.cancel === 'function') {
+          try {
+            void staleHandle.cancel();
+          } catch {}
+        }
+        if (fallbackUrl) {
+          void fallbackDownloadChain(task, fallbackUrl, fallbackHeaders, myToken, '原生通道连接超时(10s)');
+        } else {
+          failTask(task, '连接下载服务器超时（10s 无响应），请点「重试」或「换源重下」', myToken);
+        }
+      })();
+    }, 10000);
+
+    const unsub = handle.subscribe(applyNativeSnapshot);
 
     inSyncSubscribe = false;
     if (terminatedSynchronously) {
+      clearNativeWatchdog(task);
       try {
         unsub();
       } catch {}

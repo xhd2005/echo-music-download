@@ -1434,6 +1434,8 @@ export const createDownloadStore = (ctx) => {
     if (!wantLrc && !wantTags) return;
 
     task.state = 'tagging';
+    task.percent = 100;
+    task.stageText = wantLrc ? '正在匹配歌词…' : '正在写入封面与标签…';
     task.updatedAt = Date.now();
     persist();
 
@@ -1465,7 +1467,11 @@ export const createDownloadStore = (ctx) => {
     let lyricText = '';
     if (wantLrc) {
       try {
-        const lrcRes = await fetchLyricsForTask(ctx, task, state.options.preferBilingualLrc);
+        const lrcRes = await withTimeout(
+          fetchLyricsForTask(ctx, task, state.options.preferBilingualLrc),
+          5000,
+          '歌词匹配超时',
+        );
         lyricText = lrcRes?.lyric || '';
       } catch {}
     }
@@ -1488,12 +1494,26 @@ export const createDownloadStore = (ctx) => {
     // 2. 内嵌音频标签与封面（MP3 ID3v2.3 / FLAC Vorbis + Picture）
     const ext = String(relativePath.split('.').pop() || '').toLowerCase();
     if (wantTags && (ext === 'mp3' || ext === 'flac') && ctx?.fs?.writeFile) {
+      task.stageText = '正在写入封面与标签…';
       let coverData = null;
       if (wantCover && task.coverUrl) {
-        coverData = await fetchCoverBytesForTask(ctx, task.coverUrl);
+        try {
+          coverData = await withTimeout(
+            fetchCoverBytesForTask(ctx, task.coverUrl),
+            4000,
+            '封面下载超时',
+          );
+        } catch {}
       }
 
-      const audioRead = await readDownloadedAudioBytes(ctx, makeFileRef(relativePath));
+      let audioRead = { ok: false, reason: 'timeout' };
+      try {
+        audioRead = await withTimeout(
+          readDownloadedAudioBytes(ctx, makeFileRef(relativePath)),
+          4000,
+          '读取音频超时',
+        );
+      } catch {}
       if (audioRead.ok && audioRead.bytes) {
         try {
           const tagPayload = {
@@ -1577,13 +1597,15 @@ export const createDownloadStore = (ctx) => {
     }
     stopPolling(task);
     cleanupLog(task);
+    task.percent = 100;
+    task.stageText = '正在整理文件…';
     task.speed = '';
     task.eta = '';
     task.bytesPerSecond = 0;
     try {
-      await postProcessTaskFile(task, relativePath);
+      await withTimeout(postProcessTaskFile(task, relativePath), 10000, '后处理超时');
     } catch (e) {
-      console.warn('[echo-music-download] 后处理异常:', e);
+      console.warn('[echo-music-download] 后处理异常或超时（保留原音频）:', e);
     }
     if (expectedToken != null && task._runToken !== expectedToken) return;
     if (task.state === 'canceled') {
@@ -1592,6 +1614,7 @@ export const createDownloadStore = (ctx) => {
       return;
     }
     task.state = 'done';
+    task.stageText = '';
     task.percent = 100;
     task.speed = '';
     task.eta = '';
@@ -1924,7 +1947,7 @@ export const createDownloadStore = (ctx) => {
           url,
           method: 'GET',
           headers: reqHeaders,
-          responseType: 'arraybuffer',
+          responseType: 'arrayBuffer',
           timeoutMs: 30000,
         }),
         32000,
@@ -2087,6 +2110,8 @@ export const createDownloadStore = (ctx) => {
       if (s.state === 'completed') {
         clearNativeWatchdog(task);
         terminatedSynchronously = inSyncSubscribe;
+        task.percent = 100;
+        task.stageText = '正在写入标签与歌词…';
         const actualName =
           s.result?.file?.kind === 'directory-file' && s.result.file.relativePath
             ? s.result.file.relativePath
@@ -2148,7 +2173,21 @@ export const createDownloadStore = (ctx) => {
       }
     };
 
-    // 主动 1s 轮询 handle.getSnapshot()：防止宿主 IPC 推送丢失导致已下完却卡 0% / 误报超时
+    // 主动 500ms 轮询 handle.getSnapshot() + 并行挂载 handle.wait()：确保瞬时下载完成也能零延迟同步
+    if (typeof handle.wait === 'function') {
+      void Promise.resolve(handle.wait())
+        .then((result) => {
+          if (task._handle !== handle || task._runToken !== myToken) return;
+          applyNativeSnapshot({
+            state: 'completed',
+            receivedBytes: Number(result?.bytes || 1),
+            totalBytes: Number(result?.bytes || 1),
+            result,
+          });
+        })
+        .catch(() => {});
+    }
+
     if (typeof handle.getSnapshot === 'function') {
       task._nativePoller = setInterval(() => {
         if (task._handle !== handle || task._runToken !== myToken) {
@@ -2161,7 +2200,7 @@ export const createDownloadStore = (ctx) => {
             if (snap) applyNativeSnapshot(snap);
           })
           .catch(() => {});
-      }, 1000);
+      }, 500);
     }
 
     // 10s 零字节看门狗：触发前先主动复核 getSnapshot() 与磁盘文件，确认未完成才回退
@@ -6614,8 +6653,7 @@ export function activate(ctx) {
                         type: 'button',
                         class: 'emd-overview-card is-clickable',
                         onClick: () => {
-                          if (store.state.saveDir) void openSaveDir();
-                          else void store.chooseSaveDir();
+                          void store.chooseSaveDir();
                         },
                       },
                       [
@@ -6634,7 +6672,7 @@ export function activate(ctx) {
                         h(
                           'div',
                           { class: 'emd-overview-sub' },
-                          store.state.saveDir ? '点击打开本地保存目录' : '点击立即授权保存位置',
+                          store.state.saveDir ? '点击更改或重新授权目录' : '点击立即授权保存位置',
                         ),
                       ],
                     ),

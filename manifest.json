@@ -1,7 +1,7 @@
 {
   "id": "echo-music-download",
   "name": "歌曲下载",
-  "version": "2.4.3",
+  "version": "2.4.4",
   "description": "酷狗歌曲与歌单全功能下载器：EchoMusic 第一方原生极简界面（双 Tab、侧滑歌单/设置抽屉、无边框任务行）、单曲/批量/全局暂停与取消、防误触选歌确认、MP3(ID3v2.3)/FLAC 封面歌词内嵌、双语 .lrc 导出及灰歌解灰联动",
   "author": "xhd2005",
   "icon": "logo.png",

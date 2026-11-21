@@ -736,6 +736,82 @@ const mergeBilingualLrc = (origLrc, transLrc) => {
   return out.join('\n');
 };
 
+// ---- 统一主进程无限制 HTTP 请求与硬超时保护（避免误用受 CORS 限制且忽略 timeoutMs 的 window.fetch） ----
+
+const withTimeout = (promise, ms, label = '请求超时') => {
+  let timer = null;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${label}（超过 ${Math.round(ms / 1000)}s）`));
+    }, ms);
+  });
+  return Promise.race([Promise.resolve(promise), timeoutPromise]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+};
+
+const netRequest = async (
+  ctx,
+  { url, method = 'GET', headers = {}, responseType = 'json', timeoutMs = 7000 } = {},
+) => {
+  if (!url) return { ok: false, status: 0, body: null };
+  // 优先使用 EchoMusic 宿主提供的无限制主进程 Node.js HTTP 请求（ctx.net.request）
+  if (typeof ctx?.net?.request === 'function') {
+    return await withTimeout(
+      ctx.net.request({ url, method, headers, responseType, timeoutMs }),
+      timeoutMs + 1500,
+      '网络请求超时',
+    );
+  }
+  // 降级兜底：使用带 AbortController 超时的全局 fetch
+  if (typeof globalThis.fetch === 'function') {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = setTimeout(() => {
+      try {
+        controller?.abort();
+      } catch {}
+    }, timeoutMs);
+    try {
+      const res = await globalThis.fetch(url, {
+        method,
+        headers,
+        signal: controller?.signal,
+      });
+      let body = null;
+      if (responseType === 'arrayBuffer') body = await res.arrayBuffer();
+      else if (responseType === 'text') body = await res.text();
+      else body = await res.json().catch(() => null);
+      return { ok: res.ok, status: res.status, url: res.url, body };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return { ok: false, status: 0, body: null };
+};
+
+const extractRelateQualityHash = (privilegePayload, targetQuality) => {
+  const data = Array.isArray(privilegePayload?.data)
+    ? privilegePayload.data[0]
+    : privilegePayload?.data || privilegePayload;
+  const goods = data?.relate_goods || data?.relateGoods || [];
+  if (!Array.isArray(goods) || goods.length === 0) return '';
+  const levelTarget =
+    targetQuality === 'flac' ? 5 : targetQuality === '320' ? 4 : targetQuality === '128' ? 2 : 0;
+  for (const item of goods) {
+    if (!item || !item.hash) continue;
+    const level = Number(item.level || item.quality || 0);
+    const qualityStr = String(item.quality || item.name || '').toLowerCase();
+    if (
+      (levelTarget === 5 && (level === 5 || qualityStr.includes('flac') || qualityStr.includes('sq'))) ||
+      (levelTarget === 4 && (level === 4 || qualityStr.includes('320') || qualityStr.includes('hq'))) ||
+      (levelTarget === 2 && (level === 2 || qualityStr.includes('128')))
+    ) {
+      return String(item.hash).trim();
+    }
+  }
+  return '';
+};
+
 const fetchLyricsForTask = async (ctx, task, preferBilingual = true) => {
   // 1. 若用户启用双语优先且已激活 echo-music-unblock，优先尝试双语歌词兜底桥
   const unblockBridge = globalThis.__echoMusicUnblock;
@@ -781,29 +857,25 @@ const fetchLyricsForTask = async (ctx, task, preferBilingual = true) => {
     } catch {}
   }
 
-  if (preferBilingual && ctx?.net?.fetch && task.title) {
+  if (preferBilingual && task.title) {
     try {
       const keyword = `${task.title} ${task.artist}`.trim();
-      const searchRes = await ctx.net.fetch(
-        `https://music.163.com/api/search/get/web?s=${encodeURIComponent(keyword)}&type=1&offset=0&limit=5`,
-        {
+      const searchRes = await netRequest(ctx, {
+        url: `https://music.163.com/api/search/get/web?s=${encodeURIComponent(keyword)}&type=1&offset=0&limit=5`,
+        method: 'GET',
+        headers: { Referer: 'https://music.163.com/' },
+        responseType: 'json',
+        timeoutMs: 6000,
+      });
+      const songs = searchRes?.body?.result?.songs || [];
+      if (Array.isArray(songs) && songs.length > 0 && songs[0]?.id) {
+        const lrcRes = await netRequest(ctx, {
+          url: `https://music.163.com/api/song/lyric?id=${songs[0].id}&lv=1&kv=1&tv=-1`,
           method: 'GET',
           headers: { Referer: 'https://music.163.com/' },
           responseType: 'json',
-          timeoutMs: 6500,
-        },
-      );
-      const songs = searchRes?.body?.result?.songs || [];
-      if (Array.isArray(songs) && songs.length > 0 && songs[0]?.id) {
-        const lrcRes = await ctx.net.fetch(
-          `https://music.163.com/api/song/lyric?id=${songs[0].id}&lv=1&kv=1&tv=-1`,
-          {
-            method: 'GET',
-            headers: { Referer: 'https://music.163.com/' },
-            responseType: 'json',
-            timeoutMs: 6500,
-          },
-        );
+          timeoutMs: 6000,
+        });
         const orig = lrcRes?.body?.lrc?.lyric || '';
         const trans = lrcRes?.body?.tlyric?.lyric || '';
         if (orig && trans) {
@@ -820,13 +892,14 @@ const fetchLyricsForTask = async (ctx, task, preferBilingual = true) => {
 };
 
 const fetchCoverBytesForTask = async (ctx, coverUrl) => {
-  if (!coverUrl || !ctx?.net?.fetch) return null;
+  if (!coverUrl) return null;
   try {
     const normalized = String(coverUrl).replace(/\{size\}/g, '480');
-    const res = await ctx.net.fetch(normalized, {
+    const res = await netRequest(ctx, {
+      url: normalized,
       method: 'GET',
       responseType: 'arrayBuffer',
-      timeoutMs: 9000,
+      timeoutMs: 8000,
     });
     if (!res || !res.ok || !res.body) return null;
     const bytes =
@@ -957,19 +1030,23 @@ const resolveUnblockUrlForDownload = async (ctx, task, requestedQuality) => {
     } catch {}
   }
 
-  if (ctx?.net?.fetch) {
+  if (ctx?.net?.request || typeof globalThis.fetch === 'function') {
     try {
       const br = requestedQuality === 'flac' ? '999' : '320';
-      const sRes = await ctx.net.fetch(
-        `https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name=${encodeURIComponent(keyword)}&count=5&pages=1`,
-        { method: 'GET', responseType: 'json', timeoutMs: 7000 },
-      );
+      const sRes = await netRequest(ctx, {
+        url: `https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name=${encodeURIComponent(keyword)}&count=5&pages=1`,
+        method: 'GET',
+        responseType: 'json',
+        timeoutMs: 6000,
+      });
       const list = Array.isArray(sRes?.body) ? sRes.body : [];
       if (list.length > 0 && list[0]?.id) {
-        const uRes = await ctx.net.fetch(
-          `https://music-api.gdstudio.xyz/api.php?types=url&source=netease&id=${encodeURIComponent(list[0].id)}&br=${br}`,
-          { method: 'GET', responseType: 'json', timeoutMs: 7000 },
-        );
+        const uRes = await netRequest(ctx, {
+          url: `https://music-api.gdstudio.xyz/api.php?types=url&source=netease&id=${encodeURIComponent(list[0].id)}&br=${br}`,
+          method: 'GET',
+          responseType: 'json',
+          timeoutMs: 6000,
+        });
         const url = String(uRes?.body?.url || '').trim();
         if (url && /^https?:\/\//i.test(url)) {
           return {
@@ -1681,8 +1758,12 @@ export const createDownloadStore = (ctx) => {
     return { ok: false, error: res?.error, canceled: res?.canceled };
   };
 
-  // 解析歌曲下载 URL（含多档音质回退 + 灰歌解灰联动）
+  // 解析歌曲下载 URL（对齐 EchoMusic 原生 relate_goods 音质 Hash + 兼容回退 + 硬超时 + 灰歌解灰联动）
   const resolveDownloadUrl = async (task) => {
+    const setStage = (msg) => {
+      task.stageText = msg || '';
+    };
+
     let body = null;
     let url = '';
     let ext = 'mp3';
@@ -1693,12 +1774,13 @@ export const createDownloadStore = (ctx) => {
           ? ['320', '128']
           : ['128'];
 
-    // 指定直链（来自 echo-music-unblock「下载此音源」）：优先使用，避免音源错配
+    // 1. 指定直链（来自 echo-music-unblock「下载此音源」）：优先使用
     if (task.directUrl) {
       const directUrl = task.directUrl;
       task.directUrl = '';
       task.sourceLabel = task.directSourceLabel || '解灰音源';
       task.note = `已使用指定音源「${task.sourceLabel}」下载`;
+      setStage(`使用指定音源（${task.sourceLabel}）…`);
       return {
         url: directUrl,
         ext: task.directExt || extractExt(null, directUrl),
@@ -1706,58 +1788,154 @@ export const createDownloadStore = (ctx) => {
       };
     }
 
-    for (let i = 0; i < qualityChain.length; i += 1) {
-      const q = qualityChain[i];
-      try {
-        body = await ctx.kugou.music.getSongUrl(task.hash, q);
-        url = extractSongUrl(body);
-        if (url) {
-          ext = extractExt(body, url);
-          if (i > 0) {
-            task.note = `${task.quality.toUpperCase()} 不可用，已回退 ${q.toUpperCase()}`;
-            task.quality = q;
+    // 2. 官方酷狗取链（若用户点击「换源重下」则直接跳过官方直走解灰）
+    if (!task.forceUnblock) {
+      let privilegeRes = null;
+      if (
+        (task.quality === 'flac' || task.quality === '320') &&
+        typeof ctx?.kugou?.music?.getSongPrivilegeLite === 'function'
+      ) {
+        setStage('查询音质权限…');
+        try {
+          privilegeRes = await withTimeout(
+            ctx.kugou.music.getSongPrivilegeLite(task.hash),
+            5000,
+            '查询音质权限超时',
+          );
+        } catch {}
+      }
+
+      for (let i = 0; i < qualityChain.length; i += 1) {
+        const q = qualityChain[i];
+        const qualityHash = extractRelateQualityHash(privilegeRes, q) || task.hash;
+        setStage(i === 0 ? `请求酷狗 ${q.toUpperCase()}…` : `回退酷狗 ${q.toUpperCase()}…`);
+        try {
+          body = await withTimeout(
+            ctx.kugou.music.getSongUrl(qualityHash, q),
+            8000,
+            `获取 ${q.toUpperCase()} 播放地址超时`,
+          );
+          url = extractSongUrl(body);
+          if (url) {
+            ext = extractExt(body, url);
+            if (i > 0) {
+              task.note = `${task.quality.toUpperCase()} 不可用，已回退 ${q.toUpperCase()}`;
+              task.quality = q;
+            }
+            task.sourceLabel = '酷狗官方';
+            return { url, ext, headers: undefined };
           }
-          task.sourceLabel = '酷狗官方';
-          return { url, ext, headers: undefined };
+        } catch (e) {
+          if (i === qualityChain.length - 1 && !state.options.useUnblockFallback) {
+            // 继续尝试兼容模式兜底，不提前中断
+          }
         }
-      } catch (e) {
-        if (i === qualityChain.length - 1 && !state.options.useUnblockFallback) {
-          throw e;
-        }
+      }
+
+      // 兼容模式兜底（对齐 EchoMusic resolver.ts：quality='' 与 ppageId=356753938）
+      const compatAttempts = [
+        { label: '兼容模式取链…', args: [task.hash, ''] },
+        { label: '备用通道取链…', args: [task.hash, '', 356753938] },
+      ];
+      for (const attempt of compatAttempts) {
+        setStage(attempt.label);
+        try {
+          body = await withTimeout(
+            ctx.kugou.music.getSongUrl(...attempt.args),
+            8000,
+            '兼容取链超时',
+          );
+          url = extractSongUrl(body);
+          if (url) {
+            ext = extractExt(body, url);
+            task.sourceLabel = '酷狗官方';
+            return { url, ext, headers: undefined };
+          }
+        } catch {}
       }
     }
 
-    // 官方接口未拿到有效地址（灰歌 / VIP 限制）→ 联动解灰音源
-    if (state.options.useUnblockFallback) {
-      const unblocked = await resolveUnblockUrlForDownload(ctx, task, task.quality);
-      if (unblocked && unblocked.url) {
-        task.quality = unblocked.quality || task.quality;
-        task.sourceLabel = unblocked.sourceLabel || '解灰音源';
-        task.note = `已通过「${task.sourceLabel}」解灰下载`;
-        return {
-          url: unblocked.url,
-          ext: unblocked.ext || 'mp3',
-          headers: unblocked.headers,
-        };
+    // 3. 官方接口未拿到有效地址（或用户主动「换源重下」）→ 联动解灰音源（12s 硬超时防挂起）
+    if (state.options.useUnblockFallback || task.forceUnblock) {
+      setStage('正在尝试解灰音源…');
+      try {
+        const unblocked = await withTimeout(
+          resolveUnblockUrlForDownload(ctx, task, task.quality),
+          12000,
+          '解灰音源解析超时',
+        );
+        if (unblocked && unblocked.url) {
+          task.quality = unblocked.quality || task.quality;
+          task.sourceLabel = unblocked.sourceLabel || '解灰音源';
+          task.note = `已通过「${task.sourceLabel}」解灰下载`;
+          return {
+            url: unblocked.url,
+            ext: unblocked.ext || 'mp3',
+            headers: unblocked.headers,
+          };
+        }
+      } catch (unblockErr) {
+        console.warn('[echo-music-download] 解灰超时或失败:', unblockErr);
       }
     }
 
     return null;
   };
 
+  const clearNativeWatchdog = (task) => {
+    if (task?._nativeWatchdog) {
+      clearTimeout(task._nativeWatchdog);
+      task._nativeWatchdog = null;
+    }
+  };
+
   const attachNativeSubscriber = (task, handle, myToken, { ignoreInitialPaused = false } = {}) => {
+    clearNativeWatchdog(task);
     detachNativeHandle(task, { clearHandle: false });
     task._handle = handle;
     let inSyncSubscribe = true;
     let terminatedSynchronously = false;
+    let receivedAnyBytes = false;
+
+    // 25s 零字节停滞看门狗：彻底杜绝原生下载连接挂死在 0%
+    task._nativeWatchdog = setTimeout(() => {
+      if (receivedAnyBytes || task._runToken !== myToken) return;
+      if (!['downloading', 'launching'].includes(task.state)) return;
+      console.warn('[echo-music-download] 原生下载 25s 无字节到达，中止并报错:', task.name);
+      const staleHandle = task._handle;
+      detachNativeHandle(task, { clearHandle: true });
+      if (staleHandle && typeof staleHandle.cancel === 'function') {
+        try {
+          void staleHandle.cancel();
+        } catch {}
+      }
+      failTask(task, '连接下载服务器超时（25s 无响应），请点「重试」或「换源重下」', myToken);
+    }, 25000);
 
     const unsub = handle.subscribe((s) => {
       if (!s || task._handle !== handle || task._runToken !== myToken) return;
       if (task.state === 'canceled' || task.state === 'done') return;
 
+      if (Number(s.receivedBytes || 0) > 0) {
+        receivedAnyBytes = true;
+        clearNativeWatchdog(task);
+      }
+
       if (s.totalBytes && s.totalBytes > 0) {
         task.percent = Math.min(100, Math.round((s.receivedBytes / s.totalBytes) * 100));
       }
+      if (s.state === 'queued') {
+        task.stageText = '等待传输通道…';
+      } else if (s.state === 'connecting') {
+        task.stageText = '连接服务器…';
+      } else if (s.state === 'verifying') {
+        task.stageText = '校验文件…';
+      } else if (s.state === 'committing') {
+        task.stageText = '写入磁盘…';
+      } else if (s.state === 'downloading') {
+        task.stageText = '';
+      }
+
       const isTransferring = ['downloading', 'connecting', 'verifying', 'committing'].includes(
         s.state,
       );
@@ -1767,6 +1945,7 @@ export const createDownloadStore = (ctx) => {
       syncHostTaskPanel();
 
       if (s.state === 'completed') {
+        clearNativeWatchdog(task);
         terminatedSynchronously = inSyncSubscribe;
         const actualName =
           s.result?.file?.kind === 'directory-file' && s.result.file.relativePath
@@ -1784,9 +1963,11 @@ export const createDownloadStore = (ctx) => {
         }
         void finalizeTaskSuccess(task, actualName, finalPath, myToken);
       } else if (s.state === 'canceled') {
+        clearNativeWatchdog(task);
         terminatedSynchronously = inSyncSubscribe;
         detachNativeHandle(task, { clearHandle: true });
         task.state = 'canceled';
+        task.stageText = '';
         task.error = '';
         task.note = '已取消';
         task.speed = '';
@@ -1797,13 +1978,17 @@ export const createDownloadStore = (ctx) => {
         persist();
         pump();
       } else if (s.state === 'failed' || s.state === 'interrupted') {
+        clearNativeWatchdog(task);
         if (task.state === 'paused' || task.state === 'canceled') return;
         terminatedSynchronously = inSyncSubscribe;
         detachNativeHandle(task, { clearHandle: true });
+        task.stageText = '';
         failTask(task, s.error?.message || '原生下载中断', myToken);
       } else if (s.state === 'paused') {
+        clearNativeWatchdog(task);
         if (inSyncSubscribe && ignoreInitialPaused) return;
         task.state = 'paused';
+        task.stageText = '';
         task.speed = '';
         task.eta = '';
         task.bytesPerSecond = 0;
@@ -1935,14 +2120,21 @@ export const createDownloadStore = (ctx) => {
         if (task._runToken !== myToken) return;
 
         let handle;
+        const cleanHeaders =
+          headers && typeof headers === 'object' && Object.keys(headers).length > 0
+            ? headers
+            : undefined;
         const dlRequest = {
           url,
           name: task.name,
-          headers,
+          ...(cleanHeaders ? { headers: cleanHeaders } : {}),
           target: { directoryId: state.saveDirRef.id, relativePath: task.fileName },
           conflict: 'replace',
           resume: true,
+          connectTimeoutMs: 12000,
+          idleTimeoutMs: 20000,
         };
+        task.stageText = '连接下载服务器…';
         try {
           handle = await ctx.net.download(dlRequest);
         } catch (dlErr) {
@@ -2485,28 +2677,70 @@ export const createDownloadStore = (ctx) => {
     return removed;
   };
 
-  const retryTask = async (task) => {
+  const retryTask = async (task, { forceUnblock = false } = {}) => {
     if (!task) return false;
     if (['queued', 'launching', 'downloading', 'tagging'].includes(task.state)) return false;
-    if (task.state === 'paused') {
+    if (task.state === 'paused' && !forceUnblock) {
       return resumeTask(task);
     }
+    clearNativeWatchdog(task);
     detachNativeHandle(task, { clearHandle: true });
     stopPolling(task);
+    task.forceUnblock = Boolean(forceUnblock);
     task.state = 'queued';
+    task.stageText = forceUnblock ? '准备解灰换源…' : '';
     task.percent = null;
     task.speed = '';
     task.eta = '';
     task.bytesPerSecond = 0;
     task.tagStatus = '';
     task.lrcStatus = '';
-    task.note = '';
+    task.note = forceUnblock ? '正在尝试换源重下' : '';
     task.error = '';
     task.finalPath = '';
     task.updatedAt = Date.now();
     persist();
     pump();
     return true;
+  };
+
+  const retryWithUnblock = (task) => retryTask(task, { forceUnblock: true });
+
+  const playDownloadedTask = async (task) => {
+    if (!task || task.state !== 'done') return false;
+    try {
+      // 优先使用本地已下载文件的授权媒体流零流量播放
+      if (state.saveDirRef?.id && task.fileName && typeof ctx?.fs?.openMedia === 'function') {
+        const lease = await ctx.fs.openMedia({
+          kind: 'directory-file',
+          directoryId: state.saveDirRef.id,
+          relativePath: task.fileName,
+        });
+        if (lease?.url && typeof ctx?.player?.playSong === 'function') {
+          await ctx.player.playSong({
+            id: `local-dl:${task.id}`,
+            hash: task.hash || `local-dl:${task.id}`,
+            title: task.title || task.name,
+            name: task.title || task.name,
+            artist: task.artist || '未知歌手',
+            album: task.album || '',
+            coverUrl: task.coverUrl || '',
+            duration: task.duration || 0,
+            url: lease.url,
+            source: 'local',
+          });
+          return true;
+        }
+      }
+      if (task.hash && typeof ctx?.player?.playTrack === 'function') {
+        await ctx.player.playTrack(task.hash, { autoPlay: true });
+        return true;
+      }
+    } catch (err) {
+      console.warn('[echo-music-download] 本地播放失败:', err);
+      ctx.toast.warning('播放本地文件失败，请确认文件未被移动或删除');
+    }
+    return false;
   };
 
   const retryAllFailed = () => {
@@ -2787,6 +3021,8 @@ export const createDownloadStore = (ctx) => {
     batchRetry,
     batchRemove,
     retryTask,
+    retryWithUnblock,
+    playDownloadedTask,
     retryAllFailed,
     removeTask,
     clearFinished,
@@ -4634,18 +4870,22 @@ export function activate(ctx) {
         const isErrorSub = task.state === 'failed' && Boolean(task.error);
         const subtitleText = isErrorSub ? task.error : subParts.join(' · ');
 
-        // 活动行右侧进度文案
+        // 活动行右侧进度文案（优先展示实时阶段诊断文案）
         let progressText = '';
         if (task.state === 'tagging') {
-          progressText = '写入标签与歌词…';
+          progressText = task.stageText || '写入标签与歌词…';
         } else if (task.state === 'launching') {
-          progressText = '解析音源…';
+          progressText = task.stageText || '解析音源…';
         } else if (task.state === 'downloading') {
-          progressText = `${pct.toFixed(0)}%${task.speed ? ` · ${task.speed}` : ''}`;
+          if (pct === 0 && !task.speed && task.stageText) {
+            progressText = task.stageText;
+          } else {
+            progressText = `${pct.toFixed(0)}%${task.speed ? ` · ${task.speed}` : ''}`;
+          }
         } else if (task.state === 'paused') {
           progressText = pct > 0 ? `已暂停 · ${pct.toFixed(0)}%` : '已暂停';
         } else if (task.state === 'queued') {
-          progressText = '等待下载';
+          progressText = task.stageText || '等待下载';
         }
 
         return h(
@@ -4654,11 +4894,17 @@ export function activate(ctx) {
             class: [
               'emd-task-row',
               isChecked ? 'emd-task-row-selected' : '',
-              batchManageMode.value ? 'emd-task-row-clickable' : '',
+              batchManageMode.value || task.state === 'done' ? 'emd-task-row-clickable' : '',
             ],
             key: task.id,
+            title: !batchManageMode.value && task.state === 'done' ? '双击播放本地文件' : undefined,
             onClick: () => {
               if (batchManageMode.value) toggleTaskSelect(task.id);
+            },
+            onDblclick: () => {
+              if (!batchManageMode.value && task.state === 'done') {
+                void store.playDownloadedTask(task);
+              }
             },
           },
           [
@@ -4770,6 +5016,36 @@ export function activate(ctx) {
 
                 task.state === 'tagging'
                   ? h('span', { class: 'emd-tagging-hint' }, '写标签…')
+                  : null,
+
+                task.state === 'done'
+                  ? h(
+                      Button,
+                      {
+                        variant: 'ghost',
+                        size: 'icon',
+                        class: 'emd-icon-primary',
+                        tooltip: '本地播放',
+                        'aria-label': '本地播放',
+                        onClick: () => void store.playDownloadedTask(task),
+                      },
+                      { default: () => iconSvg(h, ICONS.play, { size: 15 }) },
+                    )
+                  : null,
+
+                task.state === 'failed'
+                  ? h(
+                      Button,
+                      {
+                        variant: 'ghost',
+                        size: 'icon',
+                        class: 'emd-icon-primary',
+                        tooltip: '换源重下（跳过官方直走解灰）',
+                        'aria-label': '换源重下',
+                        onClick: () => void store.retryWithUnblock(task),
+                      },
+                      { default: () => iconSvg(h, ICONS.sparkles, { size: 15 }) },
+                    )
                   : null,
 
                 isEnded

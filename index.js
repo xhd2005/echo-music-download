@@ -59,7 +59,12 @@ const DEFAULT_OPTIONS = {
   useUnblockFallback: true,
   playlistSubfolder: false,
   skipExisting: true,
+  downloadEngine: 'auto',
 };
+
+const DOWNLOAD_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+const DIRECT_MAX_WRITE_BYTES = Math.floor(7.5 * 1024 * 1024);
 
 // ---- 内联图标与渲染辅助 ----
 
@@ -1889,7 +1894,150 @@ export const createDownloadStore = (ctx) => {
     }
   };
 
-  const attachNativeSubscriber = (task, handle, myToken, { ignoreInitialPaused = false } = {}) => {
+  // 通道 2：主进程 Node Axios 直连下载 + ctx.fs.writeFile 落盘（绕开 echo-plugin-downloads Session 卡死）
+  const downloadViaNetRequest = async (task, url, headers, myToken) => {
+    if (!ctx?.net?.request || typeof ctx.net.request !== 'function') {
+      return { ok: false, error: '当前宿主不支持主进程直连下载' };
+    }
+    if (!state.saveDirRef?.id || typeof ctx?.fs?.writeFile !== 'function') {
+      return { ok: false, error: '未授权可写入的保存目录' };
+    }
+    task.engine = 'direct';
+    task.state = 'downloading';
+    task.stageText = '主进程直连通道下载中…';
+    task.percent = 0;
+    task.updatedAt = Date.now();
+    persist();
+
+    const reqHeaders = {
+      'User-Agent': DOWNLOAD_USER_AGENT,
+      ...(headers && typeof headers === 'object' ? headers : {}),
+    };
+    const t0 = Date.now();
+    try {
+      const res = await withTimeout(
+        ctx.net.request({
+          url,
+          method: 'GET',
+          headers: reqHeaders,
+          responseType: 'arraybuffer',
+          timeoutMs: 30000,
+        }),
+        32000,
+        '主进程直连下载超时',
+      );
+      if (task._runToken !== myToken) return { ok: false, aborted: true };
+      const status = Number(res?.status || 0);
+      if (status >= 400 || res?.ok === false) {
+        return { ok: false, error: `直连下载响应错误 (${status || 'network'})` };
+      }
+      const raw = res?.body !== undefined ? res.body : res?.data;
+      let bytes = null;
+      if (raw instanceof Uint8Array) bytes = raw;
+      else if (raw instanceof ArrayBuffer) bytes = new Uint8Array(raw);
+      else if (ArrayBuffer.isView(raw)) bytes = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
+      else if (raw && raw.type === 'Buffer' && Array.isArray(raw.data)) bytes = new Uint8Array(raw.data);
+
+      if (!bytes || bytes.byteLength < 1024) {
+        return { ok: false, error: '直连下载返回内容为空或无效音频' };
+      }
+      if (bytes.byteLength > DIRECT_MAX_WRITE_BYTES) {
+        return { ok: false, tooLarge: true, error: '文件大于 7.5MB，自动转交 aria2c 通道' };
+      }
+
+      task.stageText = '写入本地磁盘…';
+      task.percent = 95;
+      const elapsedSec = Math.max(0.2, (Date.now() - t0) / 1000);
+      task.bytesPerSecond = Math.round(bytes.byteLength / elapsedSec);
+      task.speed = `${formatBytes(task.bytesPerSecond)}/s`;
+      task.totalBytes = bytes.byteLength;
+      task.receivedBytes = bytes.byteLength;
+
+      const targetRef = {
+        kind: 'directory-file',
+        directoryId: state.saveDirRef.id,
+        relativePath: task.fileName,
+      };
+      await ctx.fs.writeFile(targetRef, bytes, { createDirectories: true });
+      if (task._runToken !== myToken) return { ok: false, aborted: true };
+
+      task.percent = 100;
+      task.stageText = '';
+      const finalPath = `${state.saveDir}/${task.fileName}`;
+      void finalizeTaskSuccess(task, task.fileName, finalPath, myToken);
+      return { ok: true };
+    } catch (err) {
+      if (task._runToken !== myToken) return { ok: false, aborted: true };
+      return { ok: false, error: err?.message || '主进程直连下载失败' };
+    }
+  };
+
+  // 通道 2/3 自动回退调度：直连 -> aria2c -> 自动解灰换源
+  const fallbackDownloadChain = async (task, url, headers, myToken, primaryReason = '') => {
+    if (task._runToken !== myToken) return;
+    if (task.state === 'paused' || task.state === 'canceled' || task.state === 'done') return;
+
+    let lastErr = primaryReason || '原生下载失败';
+
+    // 1. 主进程 Node Axios 直连回退
+    if (!task._triedDirect) {
+      task._triedDirect = true;
+      const directRes = await downloadViaNetRequest(task, url, headers, myToken);
+      if (directRes.aborted || task._runToken !== myToken) return;
+      if (directRes.ok) return;
+      if (directRes.error) lastErr = directRes.error;
+    }
+
+    // 2. 内置 aria2c.exe 回退
+    if (!task._triedAria2 && typeof ctx?.process?.launch === 'function') {
+      task._triedAria2 = true;
+      task.engine = 'aria2c';
+      task.stageText = '切换 aria2c 引擎下载…';
+      const launch = await launchAria2(task, url);
+      if (task._runToken !== myToken) {
+        if (launch.ok && launch.pid) {
+          try {
+            await ctx.process?.terminate?.(launch.pid);
+          } catch {}
+        }
+        return;
+      }
+      if (launch.ok) {
+        task.pid = launch.pid;
+        task.state = 'downloading';
+        task.updatedAt = Date.now();
+        task._lastSize = 0;
+        task._lastActivity = Date.now();
+        persist();
+        startPolling(task, myToken);
+        return;
+      }
+      if (launch.error && !launch.canceled) {
+        lastErr = `${lastErr}；aria2c：${launch.error}`;
+      }
+    }
+
+    // 3. 若当前为酷狗官方链且开启解灰兜底，自动尝试一次解灰换源重下
+    if (!task.forceUnblock && !task._autoUnblockRetried && state.options.useUnblockFallback) {
+      task._autoUnblockRetried = true;
+      task.forceUnblock = true;
+      task._triedDirect = false;
+      task._triedAria2 = false;
+      task.stageText = '官方直链连接失败，自动尝试解灰音源…';
+      task.note = '官方服务器超时，已自动换源重下';
+      void startTask(task);
+      return;
+    }
+
+    failTask(task, `${lastErr}，请点「重试」或「换源重下」`, myToken);
+  };
+
+  const attachNativeSubscriber = (
+    task,
+    handle,
+    myToken,
+    { ignoreInitialPaused = false, fallbackUrl = '', fallbackHeaders = undefined } = {},
+  ) => {
     clearNativeWatchdog(task);
     detachNativeHandle(task, { clearHandle: false });
     task._handle = handle;
@@ -1897,11 +2045,11 @@ export const createDownloadStore = (ctx) => {
     let terminatedSynchronously = false;
     let receivedAnyBytes = false;
 
-    // 25s 零字节停滞看门狗：彻底杜绝原生下载连接挂死在 0%
+    // 10s 零字节停滞看门狗：原生下载卡在 connecting 时自动无感回退至主进程直连 / aria2c
     task._nativeWatchdog = setTimeout(() => {
       if (receivedAnyBytes || task._runToken !== myToken) return;
       if (!['downloading', 'launching'].includes(task.state)) return;
-      console.warn('[echo-music-download] 原生下载 25s 无字节到达，中止并报错:', task.name);
+      console.warn('[echo-music-download] 原生下载 10s 无字节到达，自动切换直连/aria2c:', task.name);
       const staleHandle = task._handle;
       detachNativeHandle(task, { clearHandle: true });
       if (staleHandle && typeof staleHandle.cancel === 'function') {
@@ -1909,8 +2057,12 @@ export const createDownloadStore = (ctx) => {
           void staleHandle.cancel();
         } catch {}
       }
-      failTask(task, '连接下载服务器超时（25s 无响应），请点「重试」或「换源重下」', myToken);
-    }, 25000);
+      if (fallbackUrl) {
+        void fallbackDownloadChain(task, fallbackUrl, fallbackHeaders, myToken, '原生通道连接超时(10s)');
+      } else {
+        failTask(task, '连接下载服务器超时（10s 无响应），请点「重试」或「换源重下」', myToken);
+      }
+    }, 10000);
 
     const unsub = handle.subscribe((s) => {
       if (!s || task._handle !== handle || task._runToken !== myToken) return;
@@ -1983,7 +2135,12 @@ export const createDownloadStore = (ctx) => {
         terminatedSynchronously = inSyncSubscribe;
         detachNativeHandle(task, { clearHandle: true });
         task.stageText = '';
-        failTask(task, s.error?.message || '原生下载中断', myToken);
+        const errMsg = s.error?.message || '原生下载中断';
+        if (fallbackUrl) {
+          void fallbackDownloadChain(task, fallbackUrl, fallbackHeaders, myToken, errMsg);
+        } else {
+          failTask(task, errMsg, myToken);
+        }
       } else if (s.state === 'paused') {
         clearNativeWatchdog(task);
         if (inSyncSubscribe && ignoreInitialPaused) return;
@@ -2089,8 +2246,50 @@ export const createDownloadStore = (ctx) => {
 
     const { url, ext, headers } = resolved;
     task.fileName = sanitizeFilename(task.artist, task.title, ext, task.format, task.subfolder);
+    task._triedDirect = false;
+    task._triedAria2 = false;
 
-    // 优先使用 EchoMusic v2.3.2+ 原生流式下载引擎 (ctx.net.download + ctx.fs 目录授权)
+    const dlHeaders = {
+      'User-Agent': DOWNLOAD_USER_AGENT,
+      ...(headers && typeof headers === 'object' ? headers : {}),
+    };
+    const preferredEngine = state.options.downloadEngine || 'auto';
+
+    // 优先模式 1：主进程直连优先（绕开 Electron Session，大文件自动转 aria2c）
+    if (preferredEngine === 'direct') {
+      await fallbackDownloadChain(task, url, dlHeaders, myToken, '');
+      return;
+    }
+
+    // 优先模式 2：aria2c 优先
+    if (preferredEngine === 'aria2c' && typeof ctx?.process?.launch === 'function') {
+      task._triedAria2 = true;
+      task.engine = 'aria2c';
+      task.stageText = '启动 aria2c 下载…';
+      const launch = await launchAria2(task, url);
+      if (task._runToken !== myToken) {
+        if (launch.ok && launch.pid) {
+          try {
+            await ctx.process?.terminate?.(launch.pid);
+          } catch {}
+        }
+        return;
+      }
+      if (launch.ok) {
+        task.pid = launch.pid;
+        task.state = 'downloading';
+        task.updatedAt = Date.now();
+        task._lastSize = 0;
+        task._lastActivity = Date.now();
+        persist();
+        startPolling(task, myToken);
+        return;
+      }
+      await fallbackDownloadChain(task, url, dlHeaders, myToken, launch.error || '启动 aria2c 失败');
+      return;
+    }
+
+    // 默认自动模式：原生流式引擎 (8s 超时) -> 主进程直连 -> aria2c -> 解灰换源
     const fsGrants = getFsGrantApi(ctx);
     const useNative = Boolean(ctx.net?.download && fsGrants && state.saveDirRef?.id);
     if (useNative) {
@@ -2120,19 +2319,15 @@ export const createDownloadStore = (ctx) => {
         if (task._runToken !== myToken) return;
 
         let handle;
-        const cleanHeaders =
-          headers && typeof headers === 'object' && Object.keys(headers).length > 0
-            ? headers
-            : undefined;
         const dlRequest = {
           url,
           name: task.name,
-          ...(cleanHeaders ? { headers: cleanHeaders } : {}),
+          headers: dlHeaders,
           target: { directoryId: state.saveDirRef.id, relativePath: task.fileName },
           conflict: 'replace',
           resume: true,
-          connectTimeoutMs: 12000,
-          idleTimeoutMs: 20000,
+          connectTimeoutMs: 8000,
+          idleTimeoutMs: 18000,
         };
         task.stageText = '连接下载服务器…';
         try {
@@ -2180,62 +2375,20 @@ export const createDownloadStore = (ctx) => {
           return;
         }
 
-        attachNativeSubscriber(task, handle, myToken);
+        attachNativeSubscriber(task, handle, myToken, {
+          fallbackUrl: url,
+          fallbackHeaders: dlHeaders,
+        });
       } catch (err) {
         if (task._runToken !== myToken) return;
-        console.warn('[echo-music-download] 原生下载异常，回退 aria2c:', err);
-        task.engine = 'aria2c';
-        const launch = await launchAria2(task, url);
-        if (task._runToken !== myToken) {
-          if (launch.ok && launch.pid) {
-            try {
-              await ctx.process?.terminate?.(launch.pid);
-            } catch {}
-          }
-          return;
-        }
-        if (!launch.ok) {
-          failTask(task, launch.error || '启动下载失败', myToken);
-          return;
-        }
-        task.pid = launch.pid;
-        task.state = 'downloading';
-        task.updatedAt = Date.now();
-        task._lastSize = 0;
-        task._lastActivity = Date.now();
-        persist();
-        startPolling(task, myToken);
+        console.warn('[echo-music-download] 原生下载异常，自动切换回退链路:', err);
+        await fallbackDownloadChain(task, url, dlHeaders, myToken, err?.message || '原生下载异常');
       }
       return;
     }
 
-    // 备选降级：aria2c
-    task.engine = 'aria2c';
-    const launch = await launchAria2(task, url);
-    if (task._runToken !== myToken) {
-      if (launch.ok && launch.pid) {
-        try {
-          await ctx.process?.terminate?.(launch.pid);
-        } catch {}
-      }
-      return;
-    }
-    if (!launch.ok) {
-      if (launch.canceled) {
-        failTask(task, '已取消启动 aria2c；请在弹窗中允许插件运行本地程序', myToken);
-      } else {
-        failTask(task, launch.error || '启动 aria2c 失败', myToken);
-      }
-      return;
-    }
-
-    task.pid = launch.pid;
-    task.state = 'downloading';
-    task.updatedAt = Date.now();
-    task._lastSize = 0;
-    task._lastActivity = Date.now();
-    persist();
-    startPolling(task, myToken);
+    // 未启用原生下载时直接走主进程直连 -> aria2c 链路
+    await fallbackDownloadChain(task, url, dlHeaders, myToken, '');
   };
 
   const pump = () => {
@@ -3056,6 +3209,117 @@ const CSS = `
   display: flex;
   flex-direction: column;
   user-select: none;
+}
+
+/* 顶部 4 格仪表盘概览条 */
+.emd-overview-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px 24px 6px;
+}
+@media (max-width: 820px) {
+  .emd-overview-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+.emd-overview-card {
+  border: none;
+  border-radius: var(--radius-card);
+  background: var(--content-panel-bg);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  text-align: left;
+  transition: background-color 0.15s ease;
+}
+.emd-overview-card.is-clickable {
+  cursor: pointer;
+}
+.emd-overview-card.is-clickable:hover {
+  background: var(--row-hover-bg);
+}
+.emd-overview-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.emd-overview-val {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--color-text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.emd-overview-val.is-accent {
+  color: var(--color-primary-text);
+}
+.emd-overview-sub {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 空列表快捷导入卡片网格 */
+.emd-quick-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  width: 100%;
+  max-width: 780px;
+  margin-top: 16px;
+}
+@media (max-width: 760px) {
+  .emd-quick-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.emd-quick-card {
+  border: none;
+  border-radius: var(--radius-card);
+  background: var(--content-panel-bg);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s ease, transform 0.15s ease;
+}
+.emd-quick-card:hover {
+  background: var(--row-hover-bg);
+  transform: translateY(-1px);
+}
+.emd-quick-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-item);
+  background: var(--control-muted-bg);
+  color: var(--color-primary-text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.emd-quick-title {
+  font-size: 13.5px;
+  font-weight: 650;
+  color: var(--color-text-main);
+}
+.emd-quick-desc {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--color-text-secondary);
 }
 
 /* 顶部 SliverHeader 详情与操作行 */
@@ -4134,6 +4398,39 @@ export function activate(ctx) {
 
           h('div', { class: 'emd-setting-row' }, [
             h('div', { class: 'emd-setting-copy' }, [
+              h('div', { class: 'emd-setting-title' }, '优先下载引擎'),
+              h(
+                'div',
+                { class: 'emd-setting-desc' },
+                '自动模式下原生通道超时将无感切至主进程直连或内置 aria2c，杜绝卡 0%',
+              ),
+            ]),
+            h(
+              'div',
+              { class: 'emd-seg-group', role: 'radiogroup', 'aria-label': '优先下载引擎' },
+              [
+                { id: 'auto', label: '自动回退' },
+                { id: 'direct', label: '直连优先' },
+                { id: 'aria2c', label: 'aria2c' },
+              ].map((eng) =>
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    class: [
+                      'emd-seg-btn',
+                      (opts.downloadEngine || 'auto') === eng.id ? 'emd-seg-btn-active' : '',
+                    ],
+                    onClick: () => store.saveOptions({ downloadEngine: eng.id }),
+                  },
+                  eng.label,
+                ),
+              ),
+            ),
+          ]),
+
+          h('div', { class: 'emd-setting-row' }, [
+            h('div', { class: 'emd-setting-copy' }, [
               h('div', { class: 'emd-setting-title' }, '最大同时下载任务数'),
               h('div', { class: 'emd-setting-desc' }, '建议 2 ~ 3 线程，兼顾下载速率与标签写入稳定性'),
             ]),
@@ -4627,14 +4924,16 @@ export function activate(ctx) {
         }
       });
 
-      const openPlaylistDrawer = () => {
+      const openPlaylistDrawer = (preferredMode) => {
+        if (preferredMode === 'playback-queues' || preferredMode === 'user-playlists') {
+          batchSourceMode.value = preferredMode;
+        }
         showPlaylistDrawer.value = true;
         void store.refreshExistingFiles();
         if (batchSourceMode.value === 'user-playlists' && userPlaylists.value.length === 0 && !loadingPlaylists.value) {
           void loadUserPlaylists();
         } else if (
           batchSourceMode.value === 'playback-queues' &&
-          batchSongs.value.length === 0 &&
           playbackQueues.value.length > 0
         ) {
           void selectPlaybackQueue(playbackQueues.value[0]);
@@ -5197,17 +5496,59 @@ export function activate(ctx) {
                     : '尝试调整搜索关键词或状态筛选条件。',
                 ),
                 counts.activeTabTotal === 0
-                  ? h('div', { class: 'emd-empty-cta' }, [
+                  ? h('div', { class: 'emd-quick-grid' }, [
                       h(
-                        Button,
-                        { variant: 'soft-primary', size: 'default', onClick: openPlaylistDrawer },
+                        'button',
                         {
-                          default: () =>
-                            h('span', { class: 'emd-btn-inner' }, [
-                              iconSvg(h, ICONS.plus, { size: 15 }),
-                              h('span', null, '从歌单添加'),
-                            ]),
+                          type: 'button',
+                          class: 'emd-quick-card',
+                          onClick: () => openPlaylistDrawer('playback-queues'),
                         },
+                        [
+                          h('span', { class: 'emd-quick-icon' }, [iconSvg(h, ICONS.play, { size: 16 })]),
+                          h('div', { class: 'emd-quick-title' }, '从当前播放队列导入'),
+                          h(
+                            'div',
+                            { class: 'emd-quick-desc' },
+                            '一键勾选正在听的歌单或播放队列，自动跳过已下载曲目。',
+                          ),
+                        ],
+                      ),
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          class: 'emd-quick-card',
+                          onClick: () => openPlaylistDrawer('user-playlists'),
+                        },
+                        [
+                          h('span', { class: 'emd-quick-icon' }, [iconSvg(h, ICONS.plus, { size: 16 })]),
+                          h('div', { class: 'emd-quick-title' }, '从我的酷狗歌单导入'),
+                          h(
+                            'div',
+                            { class: 'emd-quick-desc' },
+                            '支持按歌单自动创建子目录，批量下载并内嵌封面与双语歌词。',
+                          ),
+                        ],
+                      ),
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          class: 'emd-quick-card',
+                          onClick: () => {
+                            showSettingsDrawer.value = true;
+                          },
+                        },
+                        [
+                          h('span', { class: 'emd-quick-icon' }, [iconSvg(h, ICONS.settings, { size: 16 })]),
+                          h('div', { class: 'emd-quick-title' }, '下载引擎与音质设置'),
+                          h(
+                            'div',
+                            { class: 'emd-quick-desc' },
+                            '自定义默认音质、解灰兜底、主进程直连 / aria2c 自动回退策略。',
+                          ),
+                        ],
                       ),
                     ])
                   : null,
@@ -6128,6 +6469,108 @@ export function activate(ctx) {
                         ]),
                     },
                   ),
+
+                  // 1.5 紧凑 4 格仪表盘概览条（充实主界面视觉密度）
+                  h('div', { class: 'emd-overview-strip' }, [
+                    h('div', { class: 'emd-overview-card' }, [
+                      h('div', { class: 'emd-overview-label' }, [
+                        iconSvg(h, ICONS.check, { size: 12 }),
+                        h('span', null, '已下载曲目'),
+                      ]),
+                      h('div', { class: 'emd-overview-val is-accent' }, `${counts.done} 首`),
+                      h(
+                        'div',
+                        { class: 'emd-overview-sub' },
+                        counts.doneTabTotal > counts.done
+                          ? `共 ${counts.doneTabTotal} 条记录 · 双击可本地播放`
+                          : '支持双击直接离线播放',
+                      ),
+                    ]),
+                    h('div', { class: 'emd-overview-card' }, [
+                      h('div', { class: 'emd-overview-label' }, [
+                        iconSvg(h, ICONS.download, { size: 12 }),
+                        h('span', null, '进行中队列'),
+                      ]),
+                      h(
+                        'div',
+                        { class: 'emd-overview-val' },
+                        counts.activeTabTotal > 0 ? `${counts.inProgress} 运行` : '队列空闲',
+                      ),
+                      h(
+                        'div',
+                        { class: 'emd-overview-sub' },
+                        counts.totalSpeed > 0
+                          ? `实时速度 ${formatBytes(counts.totalSpeed)}/s`
+                          : counts.paused > 0
+                            ? `${counts.paused} 首已暂停`
+                            : `最大 ${store.state.maxConcurrent} 线程并发`,
+                      ),
+                    ]),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        class: 'emd-overview-card is-clickable',
+                        onClick: () => {
+                          showSettingsDrawer.value = true;
+                        },
+                      },
+                      [
+                        h('div', { class: 'emd-overview-label' }, [
+                          iconSvg(h, ICONS.settings, { size: 12 }),
+                          h('span', null, '音质与引擎'),
+                        ]),
+                        h(
+                          'div',
+                          { class: 'emd-overview-val' },
+                          `${String(store.state.quality || '320').toUpperCase()} · ${
+                            store.state.options.downloadEngine === 'direct'
+                              ? '直连优先'
+                              : store.state.options.downloadEngine === 'aria2c'
+                                ? 'aria2c'
+                                : '自动回退'
+                          }`,
+                        ),
+                        h(
+                          'div',
+                          { class: 'emd-overview-sub' },
+                          store.state.options.useUnblockFallback
+                            ? '已开启灰歌自动解灰 · 点击配置'
+                            : '仅酷狗官方音源 · 点击配置',
+                        ),
+                      ],
+                    ),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        class: 'emd-overview-card is-clickable',
+                        onClick: () => {
+                          if (store.state.saveDir) void openSaveDir();
+                          else void store.chooseSaveDir();
+                        },
+                      },
+                      [
+                        h('div', { class: 'emd-overview-label' }, [
+                          iconSvg(h, ICONS.folder, { size: 12 }),
+                          h('span', null, '保存目录'),
+                        ]),
+                        h(
+                          'div',
+                          { class: 'emd-overview-val', title: store.state.saveDir || '' },
+                          store.state.saveDir
+                            ? String(store.state.saveDir).split(/[\\/]/).filter(Boolean).pop() ||
+                                store.state.saveDir
+                            : '未选择目录',
+                        ),
+                        h(
+                          'div',
+                          { class: 'emd-overview-sub' },
+                          store.state.saveDir ? '点击打开本地保存目录' : '点击立即授权保存位置',
+                        ),
+                      ],
+                    ),
+                  ]),
 
                   // 2. 原生下划线 Tabs + PageStickyHeader（零白线，右侧集成了搜索与批量管理）
                   h(

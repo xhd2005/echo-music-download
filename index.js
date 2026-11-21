@@ -1101,6 +1101,15 @@ export const createDownloadStore = (ctx) => {
     state.runningCount = Math.max(0, state.runningCount - 1);
   };
 
+  // 非响应式句柄映射（task.id -> 原始 DownloadHandle），彻底规避 Vue 3 reactive() 将句柄包装为 Proxy 导致引用比较失败
+  const nativeHandles = new Map();
+  const getNativeHandle = (task) => (task?.id ? nativeHandles.get(task.id) || null : null);
+  const setNativeHandle = (task, handle) => {
+    if (!task?.id) return;
+    if (handle) nativeHandles.set(task.id, handle);
+    else nativeHandles.delete(task.id);
+  };
+
   const detachNativeHandle = (task, { clearHandle = true } = {}) => {
     if (!task) return null;
     if (typeof task._unsub === 'function') {
@@ -1109,9 +1118,9 @@ export const createDownloadStore = (ctx) => {
       } catch {}
       task._unsub = null;
     }
-    const handle = task._handle || null;
+    const handle = getNativeHandle(task);
     if (clearHandle) {
-      task._handle = null;
+      setNativeHandle(task, null);
       task._resumeHandle = false;
     }
     return handle;
@@ -2067,13 +2076,13 @@ export const createDownloadStore = (ctx) => {
   ) => {
     clearNativeWatchdog(task);
     detachNativeHandle(task, { clearHandle: false });
-    task._handle = handle;
+    setNativeHandle(task, handle);
     let inSyncSubscribe = true;
     let terminatedSynchronously = false;
     let receivedAnyBytes = false;
 
     const applyNativeSnapshot = (s) => {
-      if (!s || task._handle !== handle || task._runToken !== myToken) return;
+      if (!s || getNativeHandle(task) !== handle || task._runToken !== myToken) return;
       if (task.state === 'canceled' || task.state === 'done') return;
 
       if (Number(s.receivedBytes || 0) > 0 || s.state === 'completed' || s.state === 'verifying' || s.state === 'committing') {
@@ -2177,7 +2186,7 @@ export const createDownloadStore = (ctx) => {
     if (typeof handle.wait === 'function') {
       void Promise.resolve(handle.wait())
         .then((result) => {
-          if (task._handle !== handle || task._runToken !== myToken) return;
+          if (getNativeHandle(task) !== handle || task._runToken !== myToken) return;
           applyNativeSnapshot({
             state: 'completed',
             receivedBytes: Number(result?.bytes || 1),
@@ -2190,7 +2199,7 @@ export const createDownloadStore = (ctx) => {
 
     if (typeof handle.getSnapshot === 'function') {
       task._nativePoller = setInterval(() => {
-        if (task._handle !== handle || task._runToken !== myToken) {
+        if (getNativeHandle(task) !== handle || task._runToken !== myToken) {
           clearNativeWatchdog(task);
           return;
         }
@@ -2249,7 +2258,7 @@ export const createDownloadStore = (ctx) => {
 
         console.warn('[echo-music-download] 原生下载 10s 无字节到达，自动切换直连/aria2c:', task.name);
         clearNativeWatchdog(task);
-        const staleHandle = task._handle;
+        const staleHandle = getNativeHandle(task);
         detachNativeHandle(task, { clearHandle: true });
         if (staleHandle && typeof staleHandle.cancel === 'function') {
           try {
@@ -2283,7 +2292,7 @@ export const createDownloadStore = (ctx) => {
     task._runToken = myToken;
     task._resumeHandle = false;
 
-    const handle = task._handle;
+    const handle = getNativeHandle(task);
     if (!handle || typeof handle.resume !== 'function') {
       await startTask(task);
       return;
@@ -2470,7 +2479,7 @@ export const createDownloadStore = (ctx) => {
 
         if (task._runToken !== myToken) {
           if (task.state === 'paused' && typeof handle?.pause === 'function') {
-            task._handle = handle;
+            setNativeHandle(task, handle);
             try {
               await handle.pause();
             } catch {}
@@ -2503,7 +2512,8 @@ export const createDownloadStore = (ctx) => {
       const next = state.tasks.find((t) => t.state === 'queued');
       if (!next) break;
       acquireRunningSlot(next);
-      if (next._resumeHandle && next._handle && typeof next._handle.resume === 'function') {
+      const nextHandle = getNativeHandle(next);
+      if (next._resumeHandle && nextHandle && typeof nextHandle.resume === 'function') {
         void resumeNativeHandle(next);
       } else {
         void startTask(next);
@@ -2693,7 +2703,8 @@ export const createDownloadStore = (ctx) => {
     }
     task.updatedAt = Date.now();
 
-    if (task._handle && typeof task._handle.resume === 'function') {
+    const existingHandle = getNativeHandle(task);
+    if (existingHandle && typeof existingHandle.resume === 'function') {
       if (state.runningCount < state.maxConcurrent) {
         acquireRunningSlot(task);
         void resumeNativeHandle(task);
@@ -2730,7 +2741,8 @@ export const createDownloadStore = (ctx) => {
       ) {
         task.note = '';
       }
-      task._resumeHandle = Boolean(task._handle && typeof task._handle.resume === 'function');
+      const hdl = getNativeHandle(task);
+      task._resumeHandle = Boolean(hdl && typeof hdl.resume === 'function');
       task.state = 'queued';
       task.updatedAt = now;
     }
@@ -3212,7 +3224,6 @@ export const createDownloadStore = (ctx) => {
               _countedRunning: false,
               _runToken: 0,
               _resumeHandle: false,
-              _handle: null,
               _unsub: null,
             };
           });
@@ -3234,6 +3245,7 @@ export const createDownloadStore = (ctx) => {
   };
 
   const dispose = () => {
+    nativeHandles.clear();
     if (hostTaskController) {
       try {
         if (typeof hostTaskController.dismiss === 'function') {

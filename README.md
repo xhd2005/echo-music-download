@@ -1,6 +1,14 @@
-# 歌曲下载 (`echo-music-download` v2.4.4)
+# 歌曲下载 (`echo-music-download` v2.4.5)
 
 为 **EchoMusic (`>= 2.3.2`)** 打造的**第一方原生极简风格歌曲与歌单下载插件**，提供单曲/批量/全局暂停取消任务引擎、纯 JS 标签与封面内嵌（ID3v2.3 / FLAC）、同名双语 `.lrc` 导出及灰歌解灰联动。
+
+---
+
+## ✨ v2.4.5 终极根治修复（Vue 3 Reactive Proxy 句柄比较 Bug）
+
+- **彻底根除「本地瞬间已下载完成，但界面进度条永远卡在『连接服务器…』」**：
+  - 根因定位：原代码将 `DownloadHandle` 挂载在 Vue 3 `reactive()` 任务对象属性 `task._handle` 上，Vue 3 会将其自动包装为 `Proxy(handle)`，导致回调中 `task._handle !== handle` **恒为 `true`**，所有进度事件（`subscribe`）、`handle.wait()` 及 `getSnapshot()` 轮询全部被静默丢弃！
+  - 修复：将 `DownloadHandle` 迁至非响应式外置 `Map`（`nativeHandles`），彻底避免 Vue 3 Proxy 包装干扰；进度百分比、实时下载速率、写标签与「下载完成」弹窗现已 100% 实时准确同步。
 
 ---
 
